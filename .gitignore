@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Tap logs are the record of one run on one machine. The examples worth keeping
+# are copied into docs/samples/ on purpose.
+logs/*.csv
+
+# The calibration offset is measured on the machine that plays, so it is not
+# shared through the repository.
+calibration.json
+
+# Intermediate audio from tools/make_song.py (the ogg is committed, a wav is not)
+*.wav
+
+# macOS
+.DS_Store
