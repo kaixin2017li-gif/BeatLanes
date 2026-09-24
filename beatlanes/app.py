@@ -37,8 +37,14 @@ from .songclock import SongClock
 
 STATE_TITLE = "title"
 STATE_CALIBRATE = "calibrate"
+STATE_COUNTDOWN = "countdown"
 STATE_PLAY = "play"
 STATE_RESULTS = "results"
+
+# A short 3, 2, 1, GO before the music starts. The beat plan puts the first
+# note at the start of bar 5, so the countdown overlaps the four intro bars:
+# the player hears the drums and sees the numbers before a key is needed.
+COUNTDOWN_LEAD_IN_MS = 4000.0
 
 
 class FakeTicks:
@@ -151,6 +157,9 @@ class BeatLanesApp:
         self.state = STATE_TITLE
         self.running = True
         self.exit_code = 0
+        # Song time when a countdown starts; the first note of the chart lands
+        # when the countdown's lead-in has elapsed.
+        self.countdown_start_ms: Optional[float] = None
         # A headless run has no player to close the window, so it gets a frame
         # budget. Reaching it means the run stalled, which is worth failing on
         # rather than spinning quietly.
@@ -174,6 +183,19 @@ class BeatLanesApp:
 
         # pygame objects, created in _setup
         self.screen: Optional[pygame.Surface] = None
+        # Everything is drawn onto this offscreen surface first, then blitted
+        # to the window, so captures and the recorder read a surface this code
+        # controls rather than the window's.
+        #
+        # Depth 24 matters. Under the cocoa driver a plain Surface((w, h))
+        # inherits the display format, and that format carries an alpha mask
+        # (masks end 4278190080). pygame.image.save then writes an RGBA PNG
+        # that is transparent wherever nothing was drawn, so a windowed capture
+        # came out with white blocks where the HUD should be. The dummy driver
+        # used by headless runs has no alpha mask, which is why only windowed
+        # captures were affected. A 24-bit surface has no alpha mask on either
+        # driver, so the frames are opaque by construction.
+        self.frame: Optional[pygame.Surface] = None
         self.frame_clock = pygame.time.Clock()
         self.click = None
         self.audio_playing = False
@@ -184,6 +206,9 @@ class BeatLanesApp:
         pygame.init()
         pygame.display.set_caption(config.CAPTION)
         self.screen = pygame.display.set_mode((config.WINDOW_WIDTH, config.WINDOW_HEIGHT))
+        self.frame = pygame.Surface(
+            (config.WINDOW_WIDTH, config.WINDOW_HEIGHT), 0, 24
+        )
         if self.enable_audio and not self.headless:
             self.mixer_ok = audio.init_mixer()
             if self.mixer_ok:
@@ -261,6 +286,10 @@ class BeatLanesApp:
             elif lane is not None:
                 self._calibration_tap()
 
+        elif self.state == STATE_COUNTDOWN:
+            if name == "escape":
+                self._finish_play()
+
         elif self.state == STATE_PLAY:
             if name == "escape":
                 self._finish_play()
@@ -300,7 +329,18 @@ class BeatLanesApp:
         # absorbs the audio buffer and the input path, so the clock does not try
         # to guess either of them.
         self.clock.start()
-        self.state = STATE_PLAY
+        # The countdown shows in a real run and in a recorded demo, but not in a
+        # headless test run - a test should not have to wait for the numbers.
+        show_countdown = not self.headless or self.record_path is not None
+        if not show_countdown:
+            self.countdown_start_ms = None
+            self.state = STATE_PLAY
+        else:
+            # the countdown is anchored to the first note: 3, 2, 1 land on the
+            # three seconds before it, GO when it reaches the judgement line
+            first_note_ms = self.chart.notes[0].time_ms if self.chart.notes else 0
+            self.countdown_start_ms = max(0.0, first_note_ms - 3000.0)
+            self.state = STATE_COUNTDOWN
 
     def _finish_play(self) -> None:
         if self.session is not None:
@@ -345,7 +385,14 @@ class BeatLanesApp:
 
     # --- update -----------------------------------------------------------
     def _update(self) -> None:
-        if self.state == STATE_PLAY and self.session is not None:
+        if self.state == STATE_COUNTDOWN and self.session is not None:
+            song_ms = self.clock.song_time_ms()
+            # the countdown ends at the first note, which is when keys start to matter
+            first_note_ms = self.chart.notes[0].time_ms if self.chart.notes else 0
+            if song_ms >= first_note_ms:
+                self.state = STATE_PLAY
+
+        elif self.state == STATE_PLAY and self.session is not None:
             song_ms = self.clock.song_time_ms()
             if self.auto_taps is not None:
                 # A prepared run: judgement uses the tap's own time, so the
@@ -392,7 +439,7 @@ class BeatLanesApp:
 
     # --- draw -------------------------------------------------------------
     def _draw(self) -> None:
-        surface = self.screen
+        surface = self.frame
         if surface is None:
             return
 
@@ -403,6 +450,9 @@ class BeatLanesApp:
                 self.chart.note_count,
                 self.latency_offset,
                 self.best_accuracy,
+                # An ambient clock for the drifting background notes. Headless
+                # captures pass None so a screenshot is the same frame every time.
+                anim_ms=None if self.headless else pygame.time.get_ticks(),
             )
             if self.status_message:
                 render.text(
@@ -427,12 +477,15 @@ class BeatLanesApp:
                 run.beat_phase(song_ms),
             )
 
-        elif self.state == STATE_PLAY and self.session is not None:
+        elif self.state in (STATE_COUNTDOWN, STATE_PLAY) and self.session is not None:
             song_ms = self.clock.song_time_ms()
             render.draw_background(surface)
             render.draw_beat_grid(surface, song_ms, self.chart.bpm)
             render.draw_lanes(surface, self.flashes, song_ms)
-            render.draw_judge_line(surface, self.flashes)
+            # The judge line needs the song time to age the receptor flashes and
+            # hit bursts; before this it compared raw timestamps against 220 ms,
+            # so the flash highlight never actually fired past the first frame.
+            render.draw_judge_line(surface, self.flashes, song_ms)
             render.draw_notes(surface, self.session, song_ms)
             render.draw_lane_labels(surface)
             render.draw_play_hud(
@@ -457,13 +510,27 @@ class BeatLanesApp:
                     self.reported_fps(),
                 )
 
+            # the countdown shows over the play screen until the first note,
+            # then GO over the beat it lands on
+            if self.countdown_start_ms is not None:
+                first_note_ms = self.chart.notes[0].time_ms if self.chart.notes else 0
+                remaining = first_note_ms - song_ms
+                if remaining > 0:
+                    render.draw_countdown(surface, remaining)
+                elif remaining > -800:
+                    render.draw_go(surface, 800 + remaining)
+
         elif self.state == STATE_RESULTS and self.session is not None:
             log_name = self.last_log_path.name if self.last_log_path else "not written"
             render.draw_results(surface, self.session, log_name, self.chart.title)
 
+        if self.screen is not None:
+            self.screen.blit(surface, (0, 0))
+
         if self.screenshot_path is not None and not self._screenshot_written:
             if self._screenshot_ready():
                 self.screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+                # the frame surface is opaque, so the PNG is always solid
                 pygame.image.save(surface, str(self.screenshot_path))
                 self._screenshot_written = True
                 self.exit_code = 0
@@ -500,9 +567,9 @@ class BeatLanesApp:
         )
 
     def _write_frame(self) -> None:
-        if self._recorder is None or self.screen is None:
+        if self._recorder is None or self.frame is None:
             return
-        frame = self.screen
+        frame = self.frame
         if self.record_scale != 1:
             frame = pygame.transform.smoothscale(
                 frame,
@@ -531,8 +598,9 @@ class BeatLanesApp:
         """Whether the screen asked for by --shot-state is on show."""
         if self.state != self.screenshot_state:
             return False
-        if self.state == STATE_PLAY:
-            # wait for the requested moment of the song
+        if self.state in (STATE_PLAY, STATE_CALIBRATE):
+            # wait for the requested moment of the clock, so a calibration
+            # capture also shows taps already collected
             return self.clock.song_time_ms() >= self.screenshot_at_ms
         return True
 

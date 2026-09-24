@@ -65,6 +65,11 @@ CALIBRATION_TOLERANCE_MS = 180.0
 
 # --- colours (RGB) ----------------------------------------------------------
 BACKGROUND = (11, 17, 28)
+# The playfield background is a vertical gradient between these two stops,
+# with a soft vignette drawn over it. BACKGROUND above stays as the flat
+# fallback for anything that cannot take a gradient.
+BACKGROUND_TOP = (16, 24, 40)
+BACKGROUND_BOTTOM = (7, 10, 18)
 LANE_FILL = (24, 34, 54)
 LANE_FILL_ALT = (30, 42, 66)
 LANE_EDGE = (38, 52, 78)
@@ -73,6 +78,9 @@ BEAT_GRID = (26, 36, 56)
 NOTE_FILL = (126, 196, 255)
 NOTE_EDGE = (198, 232, 255)
 HIT_FLASH = (93, 214, 255)
+# The key slots sitting on the judgement line.
+RECEPTOR_EDGE = (86, 116, 158)
+RECEPTOR_FILL = (15, 22, 36)
 TEXT = (228, 236, 248)
 TEXT_MUTED = (128, 144, 170)
 PERFECT_COLOUR = (118, 230, 190)
