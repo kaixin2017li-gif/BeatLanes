@@ -1,112 +1,86 @@
-"""Song time.
-
-A rhythm game needs one answer to "where are we in the song?" and it needs it
-on every frame and every key press. Two readings are available in Pygame and
-BeatLanes uses both, but only one of them is trusted.
-
-Primary clock - the tick clock
-    pygame.time.get_ticks() sampled at the moment the key press is handled,
-    minus the tick reading taken when the music started, minus a calibration
-    offset measured with the metronome test. get_ticks() counts milliseconds
-    since Pygame was initialised, so the subtraction is what turns it into song
-    time.
-
-Secondary reading - the mixer
-    pygame.mixer.music.get_pos() reports how long the music has been playing.
-    The Pygame documentation only promises that much, and it returns -1 when
-    nothing is playing, so BeatLanes samples it to compare against the primary
-    clock but never judges a tap with it.
-
-The two providers are injected instead of imported so this class can be tested
-without audio hardware.
-"""
+# Song time for the game.
+# Two readings exist in pygame and both are used, but only one is trusted:
+# get_ticks() is the clock the judgement runs on, the mixer reading is only
+# logged beside it so the two can be compared.
+# The clock sources are passed in (not imported) so tests can fake the time.
 
 from __future__ import annotations
 
 from typing import Callable, Optional
 
-TickProvider = Callable[[], int]
-MixerPosProvider = Callable[[], int]
+TickProvider = Callable[[], int]  # a function that returns a tick count
+MixerPosProvider = Callable[[], int]  # a function that returns a mixer position
 
 
-def _pygame_ticks() -> int:
+def _pygame_ticks() -> int:  # the real tick clock
     import pygame
 
     return pygame.time.get_ticks()
 
 
-def _pygame_mixer_pos() -> int:
+def _pygame_mixer_pos() -> int:  # the mixer's own reading
     import pygame
 
     return pygame.mixer.music.get_pos()
 
 
-class SongClock:
-    """Converts wall-clock ticks into song time."""
-
+class SongClock:  # converts tick readings into song time
     def __init__(
         self,
-        latency_offset_ms: float = 0.0,
-        ticks_provider: Optional[TickProvider] = None,
-        mixer_pos_provider: Optional[MixerPosProvider] = None,
+        latency_offset_ms: float = 0.0,  # the measured calibration offset
+        ticks_provider: Optional[TickProvider] = None,  # injectable for tests
+        mixer_pos_provider: Optional[MixerPosProvider] = None,  # injectable too
     ) -> None:
-        self.latency_offset_ms = float(latency_offset_ms)
-        self._ticks: TickProvider = ticks_provider or _pygame_ticks
+        self.latency_offset_ms = float(latency_offset_ms)  # subtracted from song time
+        self._ticks: TickProvider = ticks_provider or _pygame_ticks  # default to the real clock
         self._mixer_pos: MixerPosProvider = mixer_pos_provider or _pygame_mixer_pos
-        self._start_ticks: Optional[int] = None
-        # (song_ms, mixer_pos_ms) pairs, kept so a run can be checked afterwards
-        self.samples: list[tuple[float, Optional[int]]] = []
+        self._start_ticks: Optional[int] = None  # tick reading when the music started
+        self.samples: list[tuple[float, Optional[int]]] = []  # (song_ms, mixer_ms) pairs kept for later checks
 
-    # --- start / stop ------------------------------------------------------
-    def start(self, at_ticks: Optional[int] = None) -> None:
-        """Mark the moment the music started."""
+    def start(self, at_ticks: Optional[int] = None) -> None:  # mark the moment the music started
         self._start_ticks = self._ticks() if at_ticks is None else int(at_ticks)
-        self.samples.clear()
+        self.samples.clear()  # old run's samples belong to that run
 
-    def stop(self) -> None:
+    def stop(self) -> None:  # forget the start, the clock reads zero again
         self._start_ticks = None
 
     @property
-    def running(self) -> bool:
+    def running(self) -> bool:  # True once start() has been called
         return self._start_ticks is not None
 
     @property
-    def latency_offset(self) -> float:
+    def latency_offset(self) -> float:  # read the offset
         return self.latency_offset_ms
 
     @latency_offset.setter
-    def latency_offset(self, value: float) -> None:
+    def latency_offset(self, value: float) -> None:  # change it after a calibration run
         self.latency_offset_ms = float(value)
 
-    # --- readings ----------------------------------------------------------
-    def tick_reading_ms(self) -> int:
-        """The raw tick reading, for the debug panel."""
+    def tick_reading_ms(self) -> int:  # the raw reading, for the debug panel
         return int(self._ticks())
 
     def song_time_ms(self, at_ticks: Optional[int] = None) -> float:
-        """Primary clock: milliseconds into the song."""
-        if self._start_ticks is None:
+        # the primary clock: (now - start) - offset. This is what the judgement uses.
+        if self._start_ticks is None:  # not started yet
             return 0.0
         now = self._ticks() if at_ticks is None else int(at_ticks)
         return (now - self._start_ticks) - self.latency_offset_ms
 
-    def mixer_position_ms(self) -> Optional[int]:
-        """What the mixer thinks, or None when the reading is unusable."""
+    def mixer_position_ms(self) -> Optional[int]:  # the mixer's opinion, or None
         try:
             position = int(self._mixer_pos())
-        except Exception:
+        except Exception:  # a broken mixer must not crash the game
             return None
-        return None if position < 0 else position
+        return None if position < 0 else position  # -1 means nothing is playing
 
-    def drift_ms(self, at_ticks: Optional[int] = None) -> Optional[float]:
-        """How far the mixer reading is from the tick clock."""
+    def drift_ms(self, at_ticks: Optional[int] = None) -> Optional[float]:  # mixer vs tick clock
         position = self.mixer_position_ms()
-        if position is None:
+        if position is None:  # no usable reading
             return None
         return self.song_time_ms(at_ticks) - position
 
     def sample(self, at_ticks: Optional[int] = None) -> tuple[float, Optional[int]]:
-        """Read both clocks at once and keep the pair for later comparison."""
+        # read both clocks at once and keep the pair for later comparison
         song_ms = self.song_time_ms(at_ticks)
         position = self.mixer_position_ms()
         self.samples.append((song_ms, position))

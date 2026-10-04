@@ -1,25 +1,14 @@
-"""The CSV tap log.
+# The CSV tap log: one row per note, written while the run happens.
 
-Every note that gets judged writes one row: when it should have been hit
-(target_ms), when it actually was (tap_ms) and the difference between the two.
-The mixer reading from the same instant goes in as well, so a finished run can
-be used to compare the two clocks instead of arguing about them.
-
-Rows are also written for missed notes, with empty tap and error columns, so
-the log shows the shape of a run and not only its successes.
-"""
-
-from __future__ import annotations
-
-import csv
-from datetime import datetime
+import csv  # the log is a CSV file
+from datetime import datetime  # for the file name and the header
 from pathlib import Path
 from typing import Optional, Union
 
-from . import config
-from .judge import Verdict
+from . import config  # where logs live
+from .judge import Verdict  # the verdict names go in the log
 
-HEADER = (
+HEADER = (  # the columns, in order
     "note_index",
     "lane",
     "target_ms",
@@ -29,80 +18,78 @@ HEADER = (
     "mixer_pos_ms",
 )
 
-VerdictLike = Union[Verdict, str]
+VerdictLike = Union[Verdict, str]  # accept the enum or its name
 
 
-class TapLog:
-    """Writes one run of taps to a CSV file."""
-
+class TapLog:  # writes one run of taps to a CSV file
     def __init__(
         self,
-        path: Optional[Path | str] = None,
-        song: str = "",
-        calibration_ms: float = 0.0,
+        path: Optional[Path | str] = None,  # where to write; default is logs/
+        song: str = "",  # song name for the header
+        calibration_ms: float = 0.0,  # offset used, for the header
     ) -> None:
-        config.LOG_DIR.mkdir(parents=True, exist_ok=True)
-        if path is None:
+        config.LOG_DIR.mkdir(parents=True, exist_ok=True)  # make logs/ if needed
+        if path is None:  # default name includes the time so runs never overwrite
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             path = config.LOG_DIR / f"taps-{stamp}.csv"
         self.path = Path(path)
         self._file = self.path.open("w", newline="", encoding="utf-8")
         self._writer = csv.writer(self._file)
-        # Leading # rows are metadata; a spreadsheet will show them as text and
-        # a script can skip anything starting with '#'.
+        # leading # rows are metadata; a spreadsheet shows them as text and a
+        # script can skip anything starting with '#'
         self._writer.writerow(["# BeatLanes tap log"])
         self._writer.writerow([f"# written {datetime.now().isoformat(timespec='seconds')}"])
-        if song:
+        if song:  # song name, if given
             self._writer.writerow([f"# song {song}"])
         self._writer.writerow([f"# calibration_offset_ms {calibration_ms:.0f}"])
-        self._writer.writerow(HEADER)
+        self._writer.writerow(HEADER)  # then the real columns
 
     def write_tap(
         self,
-        note_index: int,
-        lane: int,
-        target_ms: float,
-        tap_ms: Optional[float],
-        error_ms: Optional[float],
-        verdict: VerdictLike,
-        mixer_pos_ms: Optional[int] = None,
+        note_index: int,  # which note
+        lane: int,  # which lane
+        target_ms: float,  # when it should have been hit
+        tap_ms: Optional[float],  # when it was hit, or None on a miss
+        error_ms: Optional[float],  # tap - target, or None on a miss
+        verdict: VerdictLike,  # PERFECT / GOOD / MISS
+        mixer_pos_ms: Optional[int] = None,  # second clock reading at the tap
     ) -> None:
-        """Append one judged note."""
+        # one judged note; empty tap columns mean it was missed
         verdict_text = verdict.value if isinstance(verdict, Verdict) else str(verdict)
         self._writer.writerow(
             [
                 note_index,
                 lane,
                 f"{target_ms:.0f}",
-                "" if tap_ms is None else f"{tap_ms:.0f}",
-                "" if error_ms is None else f"{error_ms:+.0f}",
+                "" if tap_ms is None else f"{tap_ms:.0f}",  # blank on a miss
+                "" if error_ms is None else f"{error_ms:+.0f}",  # signed, so early/late shows
                 verdict_text,
-                "" if mixer_pos_ms is None else mixer_pos_ms,
+                "" if mixer_pos_ms is None else mixer_pos_ms,  # blank without audio
             ]
         )
 
-    def close(self) -> None:
+    def close(self) -> None:  # flush and close the file
         if not self._file.closed:
             self._file.flush()
             self._file.close()
 
-    def __enter__(self) -> "TapLog":
+    def __enter__(self) -> "TapLog":  # lets the log be used in a with block
         return self
 
-    def __exit__(self, *exc_info) -> None:
+    def __exit__(self, *exc_info) -> None:  # always closed, even on errors
         self.close()
 
 
 def read_log(path: Path | str) -> list[dict[str, str]]:
-    """Read a tap log back. Used by the tests and by the analysis script."""
+    # read a log back, used by the tools and the tests
     rows: list[dict[str, str]] = []
     with Path(path).open(encoding="utf-8") as handle:
         header: Optional[list[str]] = None
         for line in handle:
-            if line.startswith("#"):
+            if line.startswith("#"):  # skip the metadata rows
                 continue
             cells = next(csv.reader([line]))
-            if header is None:
+            if header is None:  # first non-comment row is the columns
                 header = cells
                 continue
             rows.append(dict(zip(header, cells)))

@@ -1,65 +1,56 @@
 #!/usr/bin/env python3
-"""BeatLanes - entry point.
+# Entry point of the BeatLanes prototype.
 
-Normal use:
-
-    python main.py
-
-Headless modes used while building and testing:
-
-    python main.py --selftest
-    python main.py --screenshot docs/shots/play.png --at 14000
-"""
+# This shows the normal way to run the program:
+#   python main.py
+# These are used while building and testing:
+#   python main.py --selftest
+#   python main.py --screenshot docs/shots/play.png --at 14000
 
 from __future__ import annotations
 
-import argparse
-import sys
+import argparse  # the command line flags
+import sys  # so the package can be found when run from the repo root
 from pathlib import Path
 
 # Allow "python main.py" from the repository root without installing anything.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from beatlanes import config  # noqa: E402
-from beatlanes.app import BeatLanesApp  # noqa: E402
-from beatlanes.chart import load_chart  # noqa: E402
+from beatlanes import config  # the window constants
+from beatlanes.app import BeatLanesApp  # the game itself
+from beatlanes.chart import load_chart  # to read the chart file
 
-# Timing errors, in milliseconds, applied to each note in turn by --selftest.
-# Three cycles of this list cover the generated chart exactly, and between them
-# the values land inside PERFECT, inside GOOD, and outside GOOD.
+# Timing errors, in ms, applied to each note in turn by --selftest. The list
+# lands inside PERFECT, inside GOOD, and outside GOOD, covering all windows.
 SELFTEST_ERROR_CYCLE = (0, 5, -5, 30, -40, 15, 60, -70, 0, 110, -115, 130, -125, 0, 10, -20)
 
 
 def build_selftest_taps(chart) -> list[tuple[int, float]]:
-    """One tap per note, shifted by the error cycle."""
+    # one tap per note, shifted by the error cycle
     taps: list[tuple[int, float]] = []
-    for position, note in enumerate(chart.notes):
-        error = SELFTEST_ERROR_CYCLE[position % len(SELFTEST_ERROR_CYCLE)]
-        taps.append((note.lane, note.time_ms + error))
+    for position, note in enumerate(chart.notes):  # walk the notes in order
+        error = SELFTEST_ERROR_CYCLE[position % len(SELFTEST_ERROR_CYCLE)]  # the error for this note
+        taps.append((note.lane, note.time_ms + error))  # press its lane, offset in time
     return taps
 
 
 def calibration_taps(bias_ms: float = 18.0) -> list[tuple[int, float]]:
-    """Taps for the metronome test, a little off the beat.
+    # taps for the metronome screen, slightly off the beat on purpose, so a
+    # recorded calibration shows an offset actually being measured
+    from beatlanes.calibration import CalibrationRun  # imported here to keep app startup light
 
-    A small constant bias is deliberate: the point of recording the calibration
-    screen is to show an offset being measured, and an offset of zero would not
-    do that.
-    """
-    from beatlanes.calibration import CalibrationRun
-
-    run = CalibrationRun()
-    return [(0, run.beat_time_ms(index) + bias_ms) for index in range(run.beats)]
+    run = CalibrationRun()  # knows the click layout
+    return [(0, run.beat_time_ms(index) + bias_ms) for index in range(run.beats)]  # one tap per click
 
 
 def expected_counts(note_count: int) -> dict[str, int]:
-    """What the session should produce, derived from the same window settings."""
+    # what the session should produce, derived from the same window settings
     counts = {"perfect": 0, "good": 0, "miss": 0, "stray": 0}
-    for position in range(note_count):
-        error = abs(SELFTEST_ERROR_CYCLE[position % len(SELFTEST_ERROR_CYCLE)])
-        if error <= config.PERFECT_MS:
+    for position in range(note_count):  # walk every note
+        error = abs(SELFTEST_ERROR_CYCLE[position % len(SELFTEST_ERROR_CYCLE)])  # its planned error
+        if error <= config.PERFECT_MS:  # inside PERFECT
             counts["perfect"] += 1
-        elif error <= config.GOOD_MS:
+        elif error <= config.GOOD_MS:  # inside GOOD
             counts["good"] += 1
         else:
             # too far from the note: the press becomes a stray tap and the note
@@ -70,30 +61,30 @@ def expected_counts(note_count: int) -> dict[str, int]:
 
 
 def run_selftest(args) -> int:
-    """Play a whole chart with prepared taps and check the outcome."""
-    chart = load_chart(args.chart)
-    taps = build_selftest_taps(chart)
+    # play a whole chart with prepared taps and check the outcome
+    chart = load_chart(args.chart)  # the chart to play
+    taps = build_selftest_taps(chart)  # the prepared presses
     app = BeatLanesApp(
         chart_path=args.chart,
         song_path=args.song,
-        latency_offset_ms=args.offset if args.offset is not None else 0.0,
-        enable_audio=False,
-        simulated_taps=taps,
-        log_path=args.log,
+        latency_offset_ms=args.offset if args.offset is not None else 0.0,  # tests run with offset 0
+        enable_audio=False,  # headless, no sound
+        simulated_taps=taps,  # the prepared presses
+        log_path=args.log,  # where the CSV goes
     )
     app.debug = args.debug
-    app.run()
-    report = app.selftest_report()
-    expected = expected_counts(chart.note_count)
+    app.run()  # play the chart
+    report = app.selftest_report()  # what actually happened
+    expected = expected_counts(chart.note_count)  # what should have happened
 
     print(f"selftest  chart '{report['chart']}'  {report['notes']} notes  {report['taps_fed']} taps fed")
-    if report["perfect"] is None:
+    if report["perfect"] is None:  # never reached the results screen
         print("SELFTEST FAILED: the run never reached the results screen")
         return 1
 
     print(f"{'':10} {'expected':>9} {'actual':>9}")
     problems = []
-    for key in ("perfect", "good", "miss", "stray"):
+    for key in ("perfect", "good", "miss", "stray"):  # compare each count
         wanted = expected[key]
         got = report[key]
         flag = "" if wanted == got else "   <-- differs"
@@ -104,7 +95,7 @@ def run_selftest(args) -> int:
     print(f"{'best combo':10} {'':>9} {report['best_combo']:>9}")
     print(f"log       {report['log']}")
 
-    if problems:
+    if problems:  # any mismatch fails the run
         print(f"SELFTEST FAILED: {', '.join(problems)} did not match")
         return 1
     print("SELFTEST PASSED")
@@ -112,6 +103,7 @@ def run_selftest(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # the command line flags
     parser = argparse.ArgumentParser(
         prog="beatlanes",
         description="A four lane keyboard rhythm prototype: D F J K.",
@@ -126,46 +118,48 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--screenshot", type=Path, default=None, help="save one frame to this PNG and exit")
     parser.add_argument("--at", type=float, default=12_000.0, help="song time for --screenshot, in ms")
     parser.add_argument(
-        "--shot-state",
+        "--shot-state",  # which screen --screenshot should capture
         choices=("title", "play", "results", "calibrate"),
         default="play",
         help="which screen to capture or record",
     )
     parser.add_argument(
-        "--shot-taps",
+        "--shot-taps",  # so the frame shows a real run, not an empty board
         action="store_true",
-        help="feed the selftest taps while taking a screenshot, so the frame shows a real run",
+        help="feed the selftest taps while taking a screenshot",
     )
     parser.add_argument(
-        "--autoplay",
+        "--autoplay",  # the game plays itself, for demos and logs
         action="store_true",
-        help="play the chart automatically: useful for a demo run, and for collecting a real tap log",
+        help="play the chart automatically",
     )
     parser.add_argument(
-        "--windowed",
+        "--windowed",  # keep the real window even for an automatic run
         action="store_true",
         help="keep a real window and audio device even for an automatic run",
     )
     parser.add_argument(
-        "--record",
+        "--record",  # write the run to an mp4
         type=Path,
         default=None,
         help="record the run to this mp4 (needs ffmpeg on the path)",
     )
     parser.add_argument("--record-fps", type=int, default=60, help="frame rate for --record")
     parser.add_argument(
-        "--record-scale",
+        "--record-scale",  # 2 gives 1920x1280 footage from the 960x640 window
         type=int,
         default=2,
-        help="pixel scale for --record; 2 gives 1920x1280 footage from the 960x640 window",
+        help="pixel scale for --record",
     )
     args = parser.parse_args(argv)
 
-    if args.selftest:
+    if args.selftest:  # the headless test run
         return run_selftest(args)
 
+    # some modes need the prepared taps: autoplay shows a real run, results and
+    # record need notes actually scored
     auto_taps = None
-    if args.shot_state == "calibrate":
+    if args.shot_state == "calibrate":  # the calibration screen uses its own taps
         auto_taps = calibration_taps()
     else:
         needs_taps = args.autoplay or args.shot_taps or (
@@ -174,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
         if needs_taps:
             auto_taps = build_selftest_taps(load_chart(args.chart))
 
-    app = BeatLanesApp(
+    app = BeatLanesApp(  # the game, wired to the flags
         chart_path=args.chart,
         song_path=args.song,
         latency_offset_ms=args.offset,
@@ -193,5 +187,5 @@ def main(argv: list[str] | None = None) -> int:
     return app.run()
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # run the game when called directly
     raise SystemExit(main())

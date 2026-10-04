@@ -1,71 +1,44 @@
-"""One play-through of a chart.
-
-The session owns the state of every note and turns key presses into
-judgements. It holds no Pygame objects at all: it is given song times and lane
-numbers, and it answers with verdicts. That is what makes the timing rules
-testable without a window or a sound card.
-
-Flow for a single note:
-
-    PENDING --tap inside the good window--> HIT
-    PENDING --song time passes it by-------> MISSED
-
-A press that no note is close enough to is counted as a stray tap. It does not
-consume a note and it does not break the combo; it usually means the player is
-tired, or that the calibration offset is wrong.
-"""
-
-from __future__ import annotations
+# One play-through: which notes are still live, and what each key press scored.
+# No pygame objects in here, so the timing rules can be tested without a window.
 
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-from . import config
-from .chart import Chart
-from .judge import Judgement, Verdict, judge_tap
-from .logbook import TapLog
-from .scoring import Score
-from .songclock import SongClock
+from . import config  # the GOOD window decides when a note is missed
+from .chart import Chart  # the chart being played
+from .judge import Judgement, Verdict, judge_tap  # the scoring rule
+from .logbook import TapLog  # the CSV log
+from .scoring import Score  # combo and totals
+from .songclock import SongClock  # the clock
 
 
-class NoteState(Enum):
-    """Where a note is in its life."""
-
-    PENDING = "pending"
-    HIT = "hit"
-    MISSED = "missed"
+class NoteState(Enum):  # where a note is in its life
+    PENDING = "pending"  # still falling, can still be hit
+    HIT = "hit"  # was hit inside the window
+    MISSED = "missed"  # the song walked past it
 
 
 @dataclass
-class LiveNote:
-    """A chart note plus its state during play."""
-
-    index: int
-    lane: int
-    time_ms: int
-    state: NoteState = NoteState.PENDING
+class LiveNote:  # a chart note plus its state during play
+    index: int  # position in the chart
+    lane: int  # which lane, 0..3
+    time_ms: int  # target time
+    state: NoteState = NoteState.PENDING  # starts as falling
 
     @property
-    def live(self) -> bool:
+    def live(self) -> bool:  # True while it can still be hit
         return self.state is NoteState.PENDING
 
     def screen_y(self, song_ms: float) -> float:
-        """Where this note is drawn at the given song time.
-
-        A note sits on the judgement line at its own target time, and is
-        APPROACH_MS above it one approach-length earlier. Everything else is
-        linear, which is why the notes stay locked to the music even when the
-        frame rate wobbles: the position comes from the clock, not from a
-        per-frame movement step.
-        """
+        # a note sits on the judgement line at its own target time; the position
+        # comes from the clock, not from a per-frame step, so slow frames never
+        # change when a note is judged
         px_per_ms = (config.JUDGE_LINE_Y - config.NOTE_SPAWN_Y) / config.APPROACH_MS
         return config.JUDGE_LINE_Y - (self.time_ms - song_ms) * px_per_ms
 
 
-class PlaySession:
-    """Turns key presses into judgements for one run."""
-
+class PlaySession:  # owns the note states for one run
     def __init__(
         self,
         chart: Chart,
@@ -73,89 +46,75 @@ class PlaySession:
         logger: Optional[TapLog] = None,
         calibration_offset_ms: float = 0.0,
     ) -> None:
-        self.chart = chart
-        self.clock = clock
-        self.logger = logger
-        self.calibration_offset_ms = calibration_offset_ms
-        self.notes = [LiveNote(note.index, note.lane, note.time_ms) for note in chart.notes]
-        self.score = Score(chart.note_count)
-        # last verdict and the song time it happened at, for the on-screen popup
-        self.last_judgement: Optional[Judgement] = None
-        self.last_judged_song_ms: float = 0.0
-        # lane -> song time of the last press, used for the lane flash
-        self.last_press_song_ms: dict[int, float] = {}
+        self.chart = chart  # the chart being played
+        self.clock = clock  # the song clock
+        self.logger = logger  # CSV log, may be None in tests
+        self.calibration_offset_ms = calibration_offset_ms  # kept for the log header
+        self.notes = [LiveNote(note.index, note.lane, note.time_ms) for note in chart.notes]  # all notes, in play order
+        self.score = Score(chart.note_count)  # combo and totals
+        self.last_judgement: Optional[Judgement] = None  # for the on-screen popup
+        self.last_judged_song_ms: float = 0.0  # when that popup appeared
+        self.last_press_song_ms: dict[int, float] = {}  # lane -> song time of the last press, for the flash
 
-    # --- lookups ----------------------------------------------------------
     @property
-    def live_notes(self) -> list[LiveNote]:
+    def live_notes(self) -> list[LiveNote]:  # the notes not yet hit or missed
         return [note for note in self.notes if note.live]
 
     def nearest_live_note(self, lane: int, at_ms: float) -> Optional[LiveNote]:
-        """The pending note in this lane closest in time to the press."""
+        # the pending note in this lane closest in time to the press
         best: Optional[LiveNote] = None
         for note in self.notes:
-            if note.lane != lane or not note.live:
+            if note.lane != lane or not note.live:  # wrong lane or already used
                 continue
             if best is None or abs(note.time_ms - at_ms) < abs(best.time_ms - at_ms):
-                best = note
+                best = note  # closer than the current best
         return best
 
-    # --- play -------------------------------------------------------------
     def update(self, song_ms: float) -> int:
-        """Miss every note the song has already passed. Returns how many."""
+        # miss every note the song has passed; returns how many
         missed = 0
         for note in self.notes:
-            if note.live and song_ms - note.time_ms > config.GOOD_MS:
-                note.state = NoteState.MISSED
+            if note.live and song_ms - note.time_ms > config.GOOD_MS:  # window is over
+                note.state = NoteState.MISSED  # nothing hit it, so it counts against the run
                 self.score.register(Verdict.MISS)
-                self._log(note, None, None, Verdict.MISS, None)
+                self._log(note, None, None, Verdict.MISS, None)  # logged with empty tap columns
                 missed += 1
         return missed
 
     def register_tap(
         self,
-        lane: int,
-        tap_ms: Optional[float] = None,
-        mixer_pos_ms: Optional[int] = None,
+        lane: int,  # which lane key was pressed
+        tap_ms: Optional[float] = None,  # press time; sampled now if not given
+        mixer_pos_ms: Optional[int] = None,  # mixer reading for the log
     ) -> Optional[Judgement]:
-        """Judge one key press.
-
-        Returns the Judgement when a note was scored, or None when the press
-        was too far from any note to count.
-        """
-        if tap_ms is None:
+        # judge one key press. Returns a Judgement, or None when no note was
+        # close enough to be scored.
+        if tap_ms is None:  # real key press: use the clock right now
             tap_ms = self.clock.song_time_ms()
-        self.last_press_song_ms[lane] = tap_ms
+        self.last_press_song_ms[lane] = tap_ms  # kept for the lane flash
 
         note = self.nearest_live_note(lane, tap_ms)
-        if note is None:
+        if note is None:  # nothing pending in this lane
             self.score.register_stray()
             return None
 
-        judgement = judge_tap(tap_ms, note.time_ms)
+        judgement = judge_tap(tap_ms, note.time_ms)  # the subtraction
         if judgement.verdict is Verdict.MISS:
-            # too far away to be credited: the note stays live and will be
-            # missed on its own if nothing better comes along
+            # too far to be credited: the note stays live and will be missed on
+            # its own if nothing better comes along
             self.score.register_stray()
             return None
 
-        note.state = NoteState.HIT
+        note.state = NoteState.HIT  # this note is used up
         self.score.register(judgement.verdict, early=judgement.early)
-        self.last_judgement = judgement
-        self.last_judged_song_ms = tap_ms
+        self.last_judgement = judgement  # shown by the popup
+        self.last_judged_song_ms = tap_ms  # popup animation starts here
         self._log(note, tap_ms, judgement.error_ms, judgement.verdict, mixer_pos_ms)
         return judgement
 
-    # --- internals --------------------------------------------------------
-    def _log(
-        self,
-        note: LiveNote,
-        tap_ms: Optional[float],
-        error_ms: Optional[float],
-        verdict: Verdict,
-        mixer_pos_ms: Optional[int],
-    ) -> None:
-        if self.logger is None:
+    def _log(self, note: LiveNote, tap_ms: Optional[float], error_ms: Optional[float], verdict: Verdict, mixer_pos_ms: Optional[int]) -> None:
+        # write one row for this note, hit or missed
+        if self.logger is None:  # tests run without a log
             return
         self.logger.write_tap(
             note_index=note.index,
@@ -167,14 +126,11 @@ class PlaySession:
             mixer_pos_ms=mixer_pos_ms,
         )
 
-    # --- results ----------------------------------------------------------
     @property
-    def finished(self) -> bool:
-        """True once nothing is left to judge."""
+    def finished(self) -> bool:  # True once nothing is left to judge
         return self.score.finished
 
-    def results_text(self) -> list[str]:
-        """Lines for the results screen."""
+    def results_text(self) -> list[str]:  # the lines shown on the results screen
         score = self.score
         lines = [
             f"SCORE      {score.points} / {score.max_points}",
