@@ -1,54 +1,54 @@
-# The judgement: decides if a key press counted.
-# Kept free of pygame so the tests can call it directly.
-# The whole rule is error = tap_ms - target_ms, then two windows.
+# Judgement: checks if a keypress is a hit.
+# separated from pygame to allow for easier testing.
+# all of it can be summed up to error = tap time - target time. we have two windows.
 
 from __future__ import annotations
 
-from dataclasses import dataclass  # gives Judgement its fields for free
-from enum import Enum  # for the three verdicts
+from dataclasses import dataclass  # gives Judgement its attributes
+from enum import Enum  # corresponding to each verdict
 
-from . import config  # the window constants live there
+from . import config  # window sizes go here
 
 
-class Verdict(Enum):  # the three outcomes a note can end with
+class Verdict(Enum):  # can return good, late or miss
     PERFECT = "PERFECT"
     GOOD = "GOOD"
     MISS = "MISS"
 
 
-@dataclass(frozen=True)  # frozen so a judgement cannot be edited by accident
-class Judgement:  # one tap that was scored against a note
-    error_ms: float  # signed: negative = early, positive = late
-    verdict: Verdict  # what the error was worth
+@dataclass(frozen=True)  # immutable so you cant mess up your judgement
+class Judgement:  # represents a single tap that hit a note
+    error_ms: float  # can be negative (early) or positive (late)
+    verdict: Verdict  # how far off you were
 
     @property
-    def early(self) -> bool:  # True when the tap came before the target time
+    def early(self) -> bool:  # if error is negative we know your early
         return self.error_ms < 0
 
     @property
-    def offset_text(self) -> str:  # the offset as the HUD shows it
-        if self.error_ms == 0:  # exact hit reads better than "+0 ms late"
+    def offset_text(self) -> str:  # displayable version of your error
+        if self.error_ms == 0:  # "+0 ms late" didnt look as cool
             return "+0 ms on time"
-        direction = "early" if self.early else "late"  # pick the word from the sign
+        direction = "early" if self.early else "late"  # based on if your late or early
         return f"{self.error_ms:+.0f} ms {direction}"
 
 
 def verdict_for_error(error_ms: float) -> Verdict:
-    # abs(error) against the two windows in config
+    # we compare the absolute value of our error to these 2 windows in our config
     error = abs(error_ms)
-    if error <= config.PERFECT_MS:  # inside 50 ms
+    if error <= config.PERFECT_MS:  # within 50 milliseconds of the target time
         return Verdict.PERFECT
-    if error <= config.GOOD_MS:  # inside 120 ms
+    if error <= config.GOOD_MS:  # within 120 milliseconds of the target time
         return Verdict.GOOD
-    return Verdict.MISS  # anything further is not a hit
+    return Verdict.MISS  # if your not within these windows you missed
 
 
 def judge_tap(tap_ms: float, target_ms: float) -> Judgement:
-    # the whole judgement: one subtraction, then the windows decide
+    # error = tap time - target time, then judge the windows
     error_ms = float(tap_ms) - float(target_ms)
     return Judgement(error_ms=error_ms, verdict=verdict_for_error(error_ms))
 
 
 def is_inside_good_window(error_ms: float) -> bool:
-    # used before scoring, to check a press is even close enough to a note
+    # this will be used to determine if the key press should even be scored
     return abs(error_ms) <= config.GOOD_MS
