@@ -5,7 +5,7 @@ from pathlib import Path
 
 # the directory this file is in and the directory above it which will be our project folder
 PACKAGE_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = PACKAGE_DIR.parent
+PROJECT_DIR = PACKAGE_DIR.parent  # repo root, one level above the package
 
 # --- files ------------------------------------------------------------------
 ASSET_DIR = PROJECT_DIR / "assets"  # the song that gets created goes here

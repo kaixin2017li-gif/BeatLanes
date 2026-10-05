@@ -17,31 +17,31 @@ with no shift means the player, not the machine.
     python tools/analyse_log.py logs/taps-*.csv --plot docs/shots/error-histogram.png
 """
 
-from __future__ import annotations
+from __future__ import annotations  # modern hint syntax
 
-import argparse
-import statistics
-import sys
-from pathlib import Path
+import argparse  # the command line flags
+import statistics  # mean, median, spread
+import sys  # so the package can be found
+from pathlib import Path  # path handling
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # same trick as the tests, run the tool from anywhere
 
-from beatlanes import config  # noqa: E402
-from beatlanes.logbook import read_log  # noqa: E402
-
-
-def load_rows(path: Path) -> list[dict[str, str]]:
-    rows = read_log(path)
-    if not rows:
-        raise SystemExit(f"{path} has no rows")
-    return rows
+from beatlanes import config  # noqa: E402  # the tolerance numbers for context
+from beatlanes.logbook import read_log  # noqa: E402  # the csv reader
 
 
-def errors_from(rows: list[dict[str, str]]) -> list[float]:
-    return [float(row["error_ms"]) for row in rows if row.get("error_ms")]
+def load_rows(path: Path) -> list[dict[str, str]]:  # load with a friendly error
+    rows = read_log(path)  # the shared reader
+    if not rows:  # empty file
+        raise SystemExit(f"{path} has no rows")  # say so and stop
+    return rows  # the rows
 
 
-def mixer_differences(rows: list[dict[str, str]]) -> list[float]:
+def errors_from(rows: list[dict[str, str]]) -> list[float]:  # just the error column
+    return [float(row["error_ms"]) for row in rows if row.get("error_ms")]  # blank rows (misses) do not count
+
+
+def mixer_differences(rows: list[dict[str, str]]) -> list[float]:  # the two clocks compared
     """tick clock song time minus the mixer reading, per tap.
 
     For a log written by real key presses this difference is the input and audio
@@ -49,119 +49,119 @@ def mixer_differences(rows: list[dict[str, str]]) -> list[float]:
     mixer is read on the frame the tap was released, so the figure carries up to
     one frame of the feed delay on top.
     """
-    differences: list[float] = []
-    for row in rows:
-        if row.get("error_ms") and row.get("mixer_pos_ms"):
-            differences.append(float(row["tap_ms"]) - float(row["mixer_pos_ms"]))
-    return differences
+    differences: list[float] = []  # the differences, one per tap
+    for row in rows:  # each row
+        if row.get("error_ms") and row.get("mixer_pos_ms"):  # only rows with both readings
+            differences.append(float(row["tap_ms"]) - float(row["mixer_pos_ms"]))  # tap time minus mixer time
+    return differences  # the list
 
 
-def describe(values: list[float]) -> str:
-    if not values:
-        return "none"
-    return (
-        f"mean {statistics.fmean(values):+7.1f} ms   "
-        f"median {statistics.median(values):+7.1f} ms   "
-        f"spread {statistics.pstdev(values):5.1f} ms   "
-        f"range {min(values):+.0f} to {max(values):+.0f} ms"
-    )
+def describe(values: list[float]) -> str:  # one line of stats
+    if not values:  # no values
+        return "none"  # say none
+    return (  # the stats line
+        f"mean {statistics.fmean(values):+7.1f} ms   "  # the average
+        f"median {statistics.median(values):+7.1f} ms   "  # the middle
+        f"spread {statistics.pstdev(values):5.1f} ms   "  # the spread
+        f"range {min(values):+.0f} to {max(values):+.0f} ms"  # and the range
+    )  # glued together
 
 
-def verdict_tally(rows: list[dict[str, str]]) -> dict[str, int]:
-    tally = {"PERFECT": 0, "GOOD": 0, "MISS": 0}
-    for row in rows:
-        tally[row["verdict"]] = tally.get(row["verdict"], 0) + 1
-    return tally
+def verdict_tally(rows: list[dict[str, str]]) -> dict[str, int]:  # count each verdict
+    tally = {"PERFECT": 0, "GOOD": 0, "MISS": 0}  # one bucket each
+    for row in rows:  # every row
+        tally[row["verdict"]] = tally.get(row["verdict"], 0) + 1  # add one, tolerating surprise verdicts
+    return tally  # the counts
 
 
-def print_report(path: Path, rows: list[dict[str, str]]) -> None:
-    tally = verdict_tally(rows)
-    errors = errors_from(rows)
-    early = [value for value in errors if value < 0]
-    late = [value for value in errors if value > 0]
+def print_report(path: Path, rows: list[dict[str, str]]) -> None:  # the whole console report
+    tally = verdict_tally(rows)  # verdict counts
+    errors = errors_from(rows)  # the errors
+    early = [value for value in errors if value < 0]  # negative side
+    late = [value for value in errors if value > 0]  # positive side
 
-    print(f"log        {path}")
-    print(f"notes      {len(rows)}")
-    print(
-        f"verdicts   PERFECT {tally['PERFECT']}   GOOD {tally['GOOD']}   MISS {tally['MISS']}"
-    )
-    print()
-    print(f"all taps   {describe(errors)}")
-    print(f"early      {describe(early)}   ({len(early)} taps)")
-    print(f"late       {describe(late)}   ({len(late)} taps)")
+    print(f"log        {path}")  # which log
+    print(f"notes      {len(rows)}")  # how many notes
+    print(  # the verdict line, split for width
+        f"verdicts   PERFECT {tally['PERFECT']}   GOOD {tally['GOOD']}   MISS {tally['MISS']}"  # the three buckets
+    )  # printed
+    print()  # spacer
+    print(f"all taps   {describe(errors)}")  # everything
+    print(f"early      {describe(early)}   ({len(early)} taps)")  # the early taps
+    print(f"late       {describe(late)}   ({len(late)} taps)")  # the late taps
 
-    if errors:
-        mean = statistics.fmean(errors)
-        median = statistics.median(errors)
-        print()
-        print(f"suggested calibration offset  {median:+.0f} ms  (median of the taps)")
-        print(
-            "  a large mean and median the same way round means the offset is "
-            f"wrong, not the player. mean {mean:+.0f} ms against median {median:+.0f} ms"
-        )
+    if errors:  # the calibration suggestion
+        mean = statistics.fmean(errors)  # the mean
+        median = statistics.median(errors)  # and the median
+        print()  # spacer
+        print(f"suggested calibration offset  {median:+.0f} ms  (median of the taps)")  # the median is what gets saved
+        print(  # the suggestion, split for width
+            "  a large mean and median the same way round means the offset is "  # the shift vs scatter rule
+            f"wrong, not the player. mean {mean:+.0f} ms against median {median:+.0f} ms"  # both numbers for comparison
+        )  # printed
 
-    differences = mixer_differences(rows)
-    print()
-    if differences:
-        print(f"tick clock vs mixer        {describe(differences)}")
-        print("  each figure is tap_ms - mixer_pos_ms for the same tap")
-    else:
-        print("tick clock vs mixer        no mixer readings in this log")
-        print("  the mixer column is only filled when the music is actually playing")
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Analyse a BeatLanes tap log.")
-    parser.add_argument("logs", type=Path, nargs="+")
-    parser.add_argument("--plot", type=Path, default=None, help="write an error histogram to this PNG")
-    args = parser.parse_args()
-
-    for path in args.logs:
-        rows = load_rows(path)
-        print_report(path, rows)
-        print()
-
-    if args.plot is not None and args.logs:
-        rows = load_rows(args.logs[0])
-        write_plot(errors_from(rows), args.plot, args.logs[0].name)
-    return 0
+    differences = mixer_differences(rows)  # the mixer column
+    print()  # spacer
+    if differences:  # readings exist
+        print(f"tick clock vs mixer        {describe(differences)}")  # the comparison line
+        print("  each figure is tap_ms - mixer_pos_ms for the same tap")  # what the figure means
+    else:  # none exist
+        print("tick clock vs mixer        no mixer readings in this log")  # say so
+        print("  the mixer column is only filled when the music is actually playing")  # and why
 
 
-def write_plot(errors: list[float], target: Path, title: str) -> None:
-    """A histogram of the tap errors, with the judgement windows marked."""
-    try:
-        import matplotlib
+def main() -> int:  # the tool entry point
+    parser = argparse.ArgumentParser(description="Analyse a BeatLanes tap log.")  # the flags
+    parser.add_argument("logs", type=Path, nargs="+")  # one or more logs
+    parser.add_argument("--plot", type=Path, default=None, help="write an error histogram to this PNG")  # optional histogram
+    args = parser.parse_args()  # parse them
 
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
-        print("matplotlib is not installed, so no plot was written")
-        return
+    for path in args.logs:  # each log
+        rows = load_rows(path)  # load it
+        print_report(path, rows)  # print the report
+        print()  # spacer between logs
 
-    if not errors:
-        print("no scored taps in this log, so no plot was written")
-        return
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    figure, axes = plt.subplots(figsize=(7.2, 3.6), dpi=140)
-    span = max(200.0, max(abs(value) for value in errors) * 1.2)
-    axes.hist(errors, bins=24, range=(-span, span), color="#4d7fd0", edgecolor="#1a2a44")
-    for edge, colour, label in (
-        (-config.GOOD_MS, "#e07070", f"GOOD -{config.GOOD_MS:.0f} ms"),
-        (-config.PERFECT_MS, "#76e6be", f"PERFECT -{config.PERFECT_MS:.0f} ms"),
-        (config.PERFECT_MS, "#76e6be", f"PERFECT +{config.PERFECT_MS:.0f} ms"),
-        (config.GOOD_MS, "#e07070", f"GOOD +{config.GOOD_MS:.0f} ms"),
-    ):
-        axes.axvline(edge, color=colour, linewidth=1.2, linestyle="--", label=label)
-    axes.axvline(0, color="#1a2a44", linewidth=1.0)
-    axes.set_xlabel("tap error (ms)   negative = early, positive = late")
-    axes.set_ylabel("notes")
-    axes.set_title(f"BeatLanes tap errors - {title}")
-    axes.legend(fontsize=7, frameon=False)
-    figure.tight_layout()
-    figure.savefig(target)
-    print(f"wrote {target}")
+    if args.plot is not None and args.logs:  # the plot, if asked
+        rows = load_rows(args.logs[0])  # first log only
+        write_plot(errors_from(rows), args.plot, args.logs[0].name)  # write it
+    return 0  # success
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def write_plot(errors: list[float], target: Path, title: str) -> None:  # the histogram writer
+    """A histogram of the tap errors, with the judgement windows marked."""  # the picture version of the report
+    try:  # matplotlib is optional
+        import matplotlib  # import it
+
+        matplotlib.use("Agg")  # headless backend, no window
+        import matplotlib.pyplot as plt  # the plotting part
+    except ImportError:  # not installed
+        print("matplotlib is not installed, so no plot was written")  # say so
+        return  # carry on
+
+    if not errors:  # no errors to plot
+        print("no scored taps in this log, so no plot was written")  # say so
+        return  # carry on
+
+    target.parent.mkdir(parents=True, exist_ok=True)  # the folder may not exist
+    figure, axes = plt.subplots(figsize=(7.2, 3.6), dpi=140)  # one wide figure
+    span = max(200.0, max(abs(value) for value in errors) * 1.2)  # x range covers the worst tap
+    axes.hist(errors, bins=24, range=(-span, span), color="#4d7fd0", edgecolor="#1a2a44")  # the histogram itself
+    for edge, colour, label in (  # the window edges
+        (-config.GOOD_MS, "#e07070", f"GOOD -{config.GOOD_MS:.0f} ms"),  # good edge, early side
+        (-config.PERFECT_MS, "#76e6be", f"PERFECT -{config.PERFECT_MS:.0f} ms"),  # perfect edge, early side
+        (config.PERFECT_MS, "#76e6be", f"PERFECT +{config.PERFECT_MS:.0f} ms"),  # perfect edge, late side
+        (config.GOOD_MS, "#e07070", f"GOOD +{config.GOOD_MS:.0f} ms"),  # good edge, late side
+    ):  # four edges, in order
+        axes.axvline(edge, color=colour, linewidth=1.2, linestyle="--", label=label)  # one dashed line each
+    axes.axvline(0, color="#1a2a44", linewidth=1.0)  # zero error, solid
+    axes.set_xlabel("tap error (ms)   negative = early, positive = late")  # the x label
+    axes.set_ylabel("notes")  # the y label
+    axes.set_title(f"BeatLanes tap errors - {title}")  # which log it came from
+    axes.legend(fontsize=7, frameon=False)  # small legend
+    figure.tight_layout()  # fit everything in
+    figure.savefig(target)  # write the png
+    print(f"wrote {target}")  # where it went
+
+
+if __name__ == "__main__":  # run directly
+    raise SystemExit(main())  # the exit code reaches the shell
