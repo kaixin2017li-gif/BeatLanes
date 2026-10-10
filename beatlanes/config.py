@@ -21,7 +21,7 @@ CALIBRATION_PATH = PROJECT_DIR / "calibration.json"  # stores your latency corre
 WINDOW_WIDTH = 960  # pixels wide the window is
 WINDOW_HEIGHT = 640  # pixels tall the window is
 FPS = 60  # caps fps
-CAPTION = "BeatLanes - 4 lane keyboard rhythm prototype"  # name of window
+CAPTION = "BeatLanes - four lane rhythm prototype"  # name of window
 
 # --- lanes ------------------------------------------------------------------
 LANE_COUNT = 4  # we have 4 lanes corresponding to each key
@@ -57,22 +57,28 @@ CALIBRATION_BEAT_MS = 500.0  # one click every 500 ms, i.e. 120 BPM
 CALIBRATION_TOLERANCE_MS = 180.0
 
 # --- colours (RGB) ----------------------------------------------------------
-BACKGROUND = (11, 17, 28)  # used as a general colour when nothing else fits
-BACKGROUND_TOP = (16, 24, 40)  # the top half of our gradient behind the lanes
-BACKGROUND_BOTTOM = (7, 10, 18)  # bottom half
-LANE_FILL = (24, 34, 54)  # colour of even lanes
-LANE_FILL_ALT = (30, 42, 66)  # colour of odd lanes
-LANE_EDGE = (38, 52, 78)  # border around each lane
-JUDGE_LINE = (47, 111, 237)  # judgement line colour
-BEAT_GRID = (26, 36, 56)  # beat markers
+# week 11 palette: a deeper indigo night with cyan / violet / pink accents.
+# the verdict colours did not change, they are what the player learned.
+BACKGROUND = (9, 11, 24)  # used as a general colour when nothing else fits
+BACKGROUND_TOP = (22, 19, 52)  # the top of the gradient, a violet night
+BACKGROUND_BOTTOM = (5, 6, 15)  # the bottom, almost black
+HIGHWAY = (10, 13, 30)  # the strip the four lanes sit on
+LANE_FILL = (15, 19, 40)  # colour of even lanes
+LANE_FILL_ALT = (19, 24, 48)  # colour of odd lanes
+LANE_EDGE = (46, 56, 96)  # border around each lane and panel
+JUDGE_LINE = (66, 132, 255)  # the deeper blue, used for halos
+BEAT_GRID = (30, 38, 72)  # beat markers
 NOTE_FILL = (126, 196, 255)  # standard note colour
-NOTE_EDGE = (198, 232, 255)  # edge will change to this colour close to target time
-HIT_FLASH = (93, 214, 255)  # used when flashing a lane and displaying your combo
-RECEPTOR_EDGE = (86, 116, 158)  # default outline colour for your keys
-RECEPTOR_FILL = (15, 22, 36)  # default inner colour of your keys
-TEXT = (228, 236, 248)  # text
-TEXT_MUTED = (128, 144, 170)  # darker text
+NOTE_EDGE = (226, 244, 255)  # edge will change to this colour close to target time
+HIT_FLASH = (93, 214, 255)  # the main cyan accent
+ACCENT_VIOLET = (170, 128, 255)  # second accent, the middle of the logo gradient
+ACCENT_PINK = (255, 128, 200)  # third accent, the end of the logo gradient
+RECEPTOR_EDGE = (78, 96, 150)  # default outline colour for your keys
+RECEPTOR_FILL = (17, 21, 44)  # default inner colour of your keys
+TEXT = (236, 242, 255)  # text
+TEXT_MUTED = (132, 144, 186)  # darker text
+TEXT_DIM = (84, 94, 136)  # the quietest text, footnotes and version tags
 PERFECT_COLOUR = (118, 230, 190)  # text for PERFECT
 GOOD_COLOUR = (240, 208, 118)  # text for GOOD
 MISS_COLOUR = (236, 112, 112)  # text for MISS
-PANEL = (16, 24, 38)  # text boxes
+PANEL = (14, 18, 38)  # text boxes

@@ -17,4 +17,4 @@ The package is split so the timing rules can be tested without opening a window:
     app         states, events and the frame loop
 """
 
-__version__ = "0.8.0"  # bumped when something visible changes
+__version__ = "0.9.0"  # bumped when something visible changes

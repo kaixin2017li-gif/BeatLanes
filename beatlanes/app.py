@@ -32,6 +32,32 @@ STATE_RESULTS = "results"  # the run is over
 
 COUNTDOWN_LEAD_IN_MS = 4000.0  # the countdown sits inside the 4-bar intro
 
+# Every key name the game reacts to. Anything else that arrives is checked
+# against the physical key positions below before it is ignored.
+COMMAND_KEYS = {"escape", "space", "tab", "left", "right", "c", "r", "t"}  # the non-lane keys
+KNOWN_KEYS = COMMAND_KEYS | set(config.LANE_KEY_TO_INDEX)  # lanes too
+
+# Physical key positions (scancodes) for the letter keys. pygame.key.name()
+# reports what the active keyboard layout calls the key; the scancode is where
+# the key sits on the board. On a layout where D F J K are not D F J K the
+# name misses, and the position still finds the right lane.
+SCANCODE_NAMES = {  # scancode -> the name the rest of the game uses
+    pygame.KSCAN_D: "d",  # lane 0
+    pygame.KSCAN_F: "f",  # lane 1
+    pygame.KSCAN_J: "j",  # lane 2
+    pygame.KSCAN_K: "k",  # lane 3
+    pygame.KSCAN_C: "c",  # calibrate
+    pygame.KSCAN_R: "r",  # retry
+    pygame.KSCAN_T: "t",  # title
+}  # the letters only, named keys like escape never change with the layout
+
+
+def key_name_for(event) -> str:  # the name _handle_key should see for one key event
+    name = pygame.key.name(event.key).lower()  # what the layout calls it
+    if name in KNOWN_KEYS:  # the normal case
+        return name  # done
+    return SCANCODE_NAMES.get(getattr(event, "scancode", None), name)  # fall back to the key's position
+
 
 class FakeTicks:  # a tick source that advances by a fixed step per frame
     # song time comes from ticks, so faking the ticks makes a headless run
@@ -150,9 +176,13 @@ class BeatLanesApp:  # the whole game, wired together
             SimulatedTaps(simulated_taps) if simulated_taps else None  # built now if we have them
         )  # feeder ready
         self.simulated_taps = list(simulated_taps) if simulated_taps else []  # kept for restarts
-        self.best_accuracy: Optional[float] = None  # shown on the title screen
+        self.last_accuracy: dict[str, float] = {}  # chart title -> last run's accuracy, shown on the title screen
+        self.best_accuracy: dict[str, float] = {}  # chart title -> best accuracy this session
+        self.new_best = False  # the results screen shows a NEW BEST pill
         self.status_message = ""  # one-line message under the title panel
-        self.flashes: dict[int, float] = {}  # lane -> song time of the last press
+        self.flashes: dict[int, float] = {}  # lane -> song time of the last scored hit, drives the burst
+        self.presses: dict[int, float] = {}  # lane -> song time of the last press, scored or not, lights the key
+        self.held: set[int] = set()  # lanes whose key is down right now
 
         # calibration state
         self.calibration_run: Optional[CalibrationRun] = None
@@ -175,7 +205,9 @@ class BeatLanesApp:  # the whole game, wired together
     def _setup(self) -> None:  # open the window, and the mixer when wanted
         pygame.init()  # start pygame itself
         pygame.display.set_caption(config.CAPTION)  # the window title
+        pygame.display.set_icon(render.make_icon())  # before set_mode, some platforms only read it then
         self.screen = pygame.display.set_mode((config.WINDOW_WIDTH, config.WINDOW_HEIGHT))  # the window, size from config
+        self._disable_text_input()  # see the note on the method, this is the week 11 key fix
         self.frame = pygame.Surface(  # the offscreen frame everything is drawn on
             (config.WINDOW_WIDTH, config.WINDOW_HEIGHT), 0, 24  # 24-bit: no alpha
         )  # sized like the window
@@ -229,12 +261,42 @@ class BeatLanesApp:  # the whole game, wired together
         self.frame_clock.tick(0 if self.headless else config.FPS)
 
     # --- events -----------------------------------------------------------
+    def _disable_text_input(self) -> None:  # turn off text input, and with it the input method (IME)
+        # The week 11 key bug. pygame 2 starts with text input switched on, and
+        # SDL re-enables it every time the window gets keyboard focus. On
+        # Windows that attaches the input method to the game window. With a
+        # Chinese IME in Chinese mode every letter key is sent to the IME as
+        # VK_PROCESSKEY, and SDL swallows those instead of making a KEYDOWN
+        # (SDL 2.28, SDL_windowskeyboard.c, IME_HandleMessage). Keys the IME
+        # does not want - ESC, SPACE, TAB, the arrows - still arrive. So the
+        # run started, D F J K stopped scoring, and on the results screen R and
+        # T did nothing while ESC still quit.
+        # Stopping text input detaches the IME from the window. The pygame docs
+        # (pygame.key.stop_text_input) say the same: text input is on by
+        # default and should be switched off when no text is being typed.
+        # It only takes effect while the window has keyboard focus, so it is
+        # called again on every focus gain as well.
+        try:  # never let this stop the game from starting
+            pygame.key.stop_text_input()  # detaches the IME, harmless where there is none
+        except pygame.error:  # e.g. no video system
+            pass  # nothing to switch off
+
     def _handle_events(self) -> None:  # read the event queue
         for event in pygame.event.get():  # pygame queues them, we drain them
             if event.type == pygame.QUIT:  # the X button
                 self.running = False  # ends the loop on the next check
+            elif event.type == pygame.WINDOWFOCUSGAINED:  # back in the window
+                self._disable_text_input()  # SDL turned text input back on, turn it off again
+            elif event.type == pygame.WINDOWFOCUSLOST:  # clicked away
+                self.held.clear()  # the key-ups go to the other window, so forget what was held
+            elif event.type in (pygame.TEXTEDITING, pygame.TEXTINPUT):  # only an input method makes these now
+                self._disable_text_input()  # something switched it back on, switch it off again
             elif event.type == pygame.KEYDOWN:  # keys are the only input
-                self._handle_key(pygame.key.name(event.key).lower())  # key name, lower case
+                self._handle_key(key_name_for(event))  # key name, lower case, with the scancode fallback
+            elif event.type == pygame.KEYUP:  # a key let go
+                lane = config.LANE_KEY_TO_INDEX.get(key_name_for(event))  # was it a lane key?
+                if lane is not None:  # yes
+                    self.held.discard(lane)  # the key cap rises again
 
     def _handle_key(self, name: str) -> None:  # one key press, handled by state
         lane = config.LANE_KEY_TO_INDEX.get(name)  # is it a lane key?
@@ -260,6 +322,10 @@ class BeatLanesApp:  # the whole game, wired together
         elif self.state == STATE_COUNTDOWN:  # during the 3, 2, 1
             if name == "escape":  # bail out of the run
                 self._finish_play()  # counts as ending the run
+            elif name == "tab":  # the overlay can go on before the notes
+                self.debug = not self.debug  # toggle
+            elif lane is not None:  # warming up on the keys
+                self._light_key(lane)  # lights up, nothing is judged yet
 
         elif self.state == STATE_PLAY:  # the song is running
             if name == "escape":  # end the run early
@@ -267,13 +333,14 @@ class BeatLanesApp:  # the whole game, wired together
             elif name == "tab":  # toggle the debug overlay
                 self.debug = not self.debug  # toggle
             elif lane is not None:  # a lane key: judge it
+                self._light_key(lane)  # every press lights its key, scored or not
                 # the mixer is sampled on the same press, so the log has both
                 # clock readings for the same moment
                 judgement = self.session.register_tap(  # the press goes to the session
                     lane, mixer_pos_ms=self.clock.mixer_position_ms()  # mixer read on this exact press
                 )  # a judgement comes back, or None
-                if judgement is not None:  # a note was scored: light the lane
-                    self.flashes[lane] = self.clock.song_time_ms()  # render reads this dict for the flash
+                if judgement is not None:  # a note was scored: burst on the key
+                    self.flashes[lane] = self.clock.song_time_ms()  # render reads this dict for the burst
 
         elif self.state == STATE_RESULTS:  # the run is over
             if name == "escape":  # quit
@@ -282,6 +349,10 @@ class BeatLanesApp:  # the whole game, wired together
                 self._start_play()  # r for rematch
             elif name == "t":  # back to the title
                 self.state = STATE_TITLE  # t for title
+
+    def _light_key(self, lane: int) -> None:  # a lane key went down: show it
+        self.presses[lane] = self.clock.song_time_ms()  # the beam and the key cap fade from here
+        self.held.add(lane)  # stays lit until the key-up
 
     # --- state changes ----------------------------------------------------
     def _start_play(self) -> None:  # begin a run
@@ -295,6 +366,8 @@ class BeatLanesApp:  # the whole game, wired together
         self.session.logger = self.log  # the session writes rows through this
         self.auto_taps = SimulatedTaps(self.simulated_taps) if self.simulated_taps else None  # rebuilt so an R restart replays the same taps
         self.flashes.clear()  # no lanes lit at the start
+        self.presses.clear()  # same for the key lights
+        self.new_best = False  # nothing beaten yet
         self.audio_playing = bool(self.enable_audio and not self.headless and audio.start_song(self.song_path))  # False means a silent run, the clock still works
         # the clock starts now; the calibration offset is what absorbs the audio
         # buffer and the input path, so the clock does not guess either
@@ -314,7 +387,14 @@ class BeatLanesApp:  # the whole game, wired together
 
     def _finish_play(self) -> None:  # end the run, close the log, show results
         if self.session is not None:  # only if a run happened
-            self.best_accuracy = self.session.score.accuracy  # shown on the title
+            accuracy = self.session.score.accuracy  # this run
+            title = self.chart.title  # scores are kept per chart
+            previous = self.best_accuracy.get(title)  # the one to beat
+            self.new_best = previous is not None and accuracy > previous  # only counts once there was something to beat
+            if previous is None or accuracy > previous:  # first run, or better
+                self.best_accuracy[title] = accuracy  # remember it
+            self.last_accuracy[title] = accuracy  # shown on the title card
+        self.held.clear()  # no keys lit on the results screen
         if self.log is not None:  # flush the CSV
             self.last_log_path = self.log.path  # the results screen shows the name
             self.log.close()  # flush before showing results
@@ -368,6 +448,7 @@ class BeatLanesApp:  # the whole game, wired together
                 # read on that frame, which is how an automatic log gets second
                 # clock readings; a real press reads it in the key handler.
                 for lane, tap_ms in self.auto_taps.due(song_ms):  # everything due by now
+                    self.presses[lane] = tap_ms  # the key lights like a real press, there is just no key-up
                     judgement = self.session.register_tap(  # judged at its own time
                         lane, tap_ms=tap_ms, mixer_pos_ms=self.clock.mixer_position_ms()  # mixer sampled on this frame
                     )  # same call the key handler makes
@@ -398,11 +479,11 @@ class BeatLanesApp:  # the whole game, wired together
                 if self.automatic:  # nobody to press anything after
                     self.running = False  # headless calibrations end here too
 
-        # drop flashes that have finished, so the dictionary cannot grow forever
-        if self.flashes:  # only work when there is something to drop
-            song_ms = self.clock.song_time_ms()  # one reading for all lanes
-            for lane in [lane for lane, at in self.flashes.items() if song_ms - at > 400]:  # collect the expired ones first
-                self.flashes.pop(lane, None)  # then remove, popping mid-loop breaks the scan
+        # drop flashes that have finished, so the dictionaries cannot grow forever
+        song_ms = self.clock.song_time_ms()  # one reading for all lanes
+        for lights in (self.flashes, self.presses):  # hits and presses age the same way
+            for lane in [lane for lane, at in lights.items() if song_ms - at > 450]:  # collect the expired ones first
+                lights.pop(lane, None)  # then remove, popping mid-loop breaks the scan
 
     # --- draw -------------------------------------------------------------
     def _draw(self) -> None:  # draw one frame, by state
@@ -411,25 +492,20 @@ class BeatLanesApp:  # the whole game, wired together
             return  # nothing to draw on yet
 
         if self.state == STATE_TITLE:  # the title screen
-            render.draw_title(  # the title panel
+            render.draw_title(  # the title card
                 surface,  # draw onto the frame
                 self.chart.title,  # of the picked chart
                 self.chart.note_count,  # notes shown under the title
                 self.latency_offset,  # the saved offset
-                self.best_accuracy,  # the last run, if any
+                last_accuracy=self.last_accuracy.get(self.chart.title),  # the last run on this chart, if any
                 anim_ms=None if self.headless else pygame.time.get_ticks(),  # None keeps captures identical
                 chart_picker=(len(self.chart_paths) > 1, self.chart_index, len(self.chart_paths)),  # the picker only shows with 2 or more charts
+                best_accuracy=self.best_accuracy.get(self.chart.title),  # best this session
+                chart_bpm=self.chart.bpm,  # meta line
+                chart_length_ms=self.chart.length_ms,  # meta line
+                lane_counts=self.chart.lane_counts,  # the per-lane bars
+                status_message=self.status_message,  # e.g. 'no audio device', now drawn on its own row
             )  # title screen done
-            if self.status_message:  # e.g. 'no audio device'
-                render.text(  # the message line
-                    surface,  # same frame
-                    self.status_message,  # the text itself
-                    (config.WINDOW_WIDTH / 2.0, 486),  # centred, under the panel
-                    size=15,  # small
-                    colour=config.TEXT_MUTED,  # muted grey
-                    mono=True,  # mono font for status lines
-                    align="center",  # centred
-                )  # message done
 
         elif self.state == STATE_CALIBRATE and self.calibration_run is not None:  # the metronome screen
             run = self.calibration_run  # shorter lines below
@@ -447,16 +523,16 @@ class BeatLanesApp:  # the whole game, wired together
             # the play screen; the countdown draws over it until the first note
             song_ms = self.clock.song_time_ms()  # one reading per frame
             render.draw_background(surface)  # gradient and vignette first
+            render.draw_highway(surface)  # the lane strip
             render.draw_beat_grid(surface, song_ms, self.chart.bpm)  # faint lines on the beat
-            render.draw_lanes(surface, self.flashes, song_ms)  # the four strips, with the press flashes
-            # the judge line needs the song time to age the receptor flashes and
-            # hit bursts; with raw timestamps the flash never fired at all
-            render.draw_judge_line(surface, self.flashes, song_ms)
+            render.draw_lane_beams(surface, self.presses, self.held, song_ms)  # light over pressed keys
+            render.draw_combo(surface, self.session, song_ms)  # big and quiet, behind the notes
             render.draw_notes(surface, self.session, song_ms)  # the falling notes
-            render.draw_lane_labels(surface)  # D F J K at the bottom
-            render.draw_play_hud(  # score, combo, song name
-                surface, self.session, song_ms, self.reported_fps(), self.chart.title  # the hud needs most of the state
-            )  # hud done
+            render.draw_highway_fades(surface)  # notes come out of the dark and sink under the keys
+            # the receptors need the song time to age the presses and hit
+            # bursts; with raw timestamps the flash never fired at all
+            render.draw_receptors(surface, self.session, self.presses, self.held, self.flashes, song_ms)  # line, keys, bursts
+            render.draw_play_hud(surface, self.session, song_ms, self.chart.title, show_hints=not self.debug)  # the side columns
 
             judgement = self.session.last_judgement  # the popup word
             if judgement is not None:  # only after a first press
@@ -487,7 +563,7 @@ class BeatLanesApp:  # the whole game, wired together
 
         elif self.state == STATE_RESULTS and self.session is not None:  # the end screen
             log_name = self.last_log_path.name if self.last_log_path else "not written"  # only the file name fits
-            render.draw_results(surface, self.session, log_name, self.chart.title)  # the end screen
+            render.draw_results(surface, self.session, log_name, self.chart.title, new_best=self.new_best)  # the end screen
 
         if self.screen is not None:  # show the finished frame
             self.screen.blit(surface, (0, 0))  # frame onto the window

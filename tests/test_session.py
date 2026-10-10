@@ -117,6 +117,21 @@ class SessionTests(unittest.TestCase):  # the tap and miss rules
         self.assertEqual(session.last_press_song_ms[0], 980.0)  # the time is kept for the renderer
 
 
+    def test_a_miss_shows_up_in_the_popup(self):  # week 11: misses were silent on screen
+        session = self.make_session((1000, 2))  # one note in lane 2
+        session.update(1200.0)  # the song walks 200 ms past it
+        self.assertIs(session.last_judgement.verdict, Verdict.MISS)  # the popup has something to say
+        self.assertEqual(session.last_judged_song_ms, 1200.0)  # and starts on the frame of the miss
+        self.assertEqual(session.last_miss_song_ms, {2: 1200.0})  # the right receptor goes red
+
+    def test_hit_errors_are_kept_for_the_results_screen(self):  # the timing strip data
+        session = self.make_session((1000, 0), (2000, 1), (3000, 2))  # three notes
+        session.register_tap(0, tap_ms=970.0)  # 30 early
+        session.register_tap(1, tap_ms=2060.0)  # 60 late
+        session.register_tap(3, tap_ms=3000.0)  # wrong lane: a stray, not a hit
+        self.assertEqual(session.hit_errors, [-30.0, 60.0])  # only the two hits, in order
+
+
 class LoggingTests(unittest.TestCase):  # the csv side
     def setUp(self):  # fresh temp dir per test
         self._tmp = tempfile.TemporaryDirectory()  # a throwaway folder

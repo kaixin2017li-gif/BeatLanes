@@ -55,6 +55,8 @@ class PlaySession:  # owns the note states for one run
         self.last_judgement: Optional[Judgement] = None  # for the on-screen popup
         self.last_judged_song_ms: float = 0.0  # when that popup appeared
         self.last_press_song_ms: dict[int, float] = {}  # lane -> song time of the last press, for the flash
+        self.last_miss_song_ms: dict[int, float] = {}  # lane -> song time of its last miss, for the red receptor flash
+        self.hit_errors: list[float] = []  # tap - target for every scored hit, the results screen plots these
 
     @property  # the renderer asks for this every frame
     def live_notes(self) -> list[LiveNote]:  # the notes not yet hit or missed
@@ -78,6 +80,11 @@ class PlaySession:  # owns the note states for one run
                 note.state = NoteState.MISSED  # nothing hit it, so it counts against the run
                 self.score.register(Verdict.MISS)  # combo break and the miss count
                 self._log(note, None, None, Verdict.MISS, None)  # logged with empty tap columns
+                # until week 11 a miss was silent on screen: the popup only ever
+                # showed hits, so a run could fall apart with no feedback at all
+                self.last_judgement = Judgement(error_ms=song_ms - note.time_ms, verdict=Verdict.MISS)  # the popup says MISS now
+                self.last_judged_song_ms = song_ms  # popup animation starts on this frame
+                self.last_miss_song_ms[note.lane] = song_ms  # the receptor flashes red
                 missed += 1  # tell the caller
         return missed  # how many died this frame
 
@@ -109,6 +116,7 @@ class PlaySession:  # owns the note states for one run
         self.score.register(judgement.verdict, early=judgement.early)  # combo, points, early/late split
         self.last_judgement = judgement  # shown by the popup
         self.last_judged_song_ms = tap_ms  # popup animation starts here
+        self.hit_errors.append(judgement.error_ms)  # kept for the timing strip on the results screen
         self._log(note, tap_ms, judgement.error_ms, judgement.verdict, mixer_pos_ms)  # one csv row for the hit
         return judgement  # the app uses it for the popup
 
