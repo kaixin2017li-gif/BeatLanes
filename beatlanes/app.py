@@ -30,7 +30,7 @@ STATE_COUNTDOWN = "countdown"  # 3, 2, 1 before the first note
 STATE_PLAY = "play"  # the song is running
 STATE_RESULTS = "results"  # the run is over
 
-COUNTDOWN_LEAD_IN_MS = 4000.0  # the countdown sits inside the 4-bar intro
+COUNTDOWN_WINDOW_MS = 3000.0  # the digits only cover the three seconds before the first note
 
 # Every key name the game reacts to. Anything else that arrives is checked
 # against the physical key positions below before it is ignored.
@@ -382,7 +382,7 @@ class BeatLanesApp:  # the whole game, wired together
             # anchored to the first note: 3, 2, 1 land on the three seconds
             # before it, GO when it reaches the judgement line
             first_note_ms = self.chart.notes[0].time_ms if self.chart.notes else 0
-            self.countdown_start_ms = max(0.0, first_note_ms - 3000.0)  # clamped so a tiny chart never goes negative
+            self.countdown_start_ms = max(0.0, first_note_ms - COUNTDOWN_WINDOW_MS)  # clamped so a tiny chart never goes negative
             self.state = STATE_COUNTDOWN  # numbers first, notes after
 
     def _finish_play(self) -> None:  # end the run, close the log, show results
@@ -556,10 +556,15 @@ class BeatLanesApp:  # the whole game, wired together
             if self.countdown_start_ms is not None:
                 first_note_ms = self.chart.notes[0].time_ms if self.chart.notes else 0  # same anchor as _start_play
                 remaining = first_note_ms - song_ms  # time before the first note
-                if remaining > 0:  # still counting
+                if remaining <= 0:  # the note is here or just past
+                    if remaining > -800:  # the 0.8 s of GO
+                        render.draw_go(surface, 800 + remaining)  # age 0 to 800 ms
+                elif remaining <= COUNTDOWN_WINDOW_MS:  # only the last three seconds
+                    # this week's stuck-on-3 bug: the gate used to be just
+                    # remaining > 0, so with the first note eight seconds in the
+                    # digit sat on its 3 clamp for the whole intro. the intro
+                    # stays quiet instead - you hear the beat, no digit yet
                     render.draw_countdown(surface, remaining)  # 3, 2, 1
-                elif remaining > -800:  # the 0.8 s of GO
-                    render.draw_go(surface, 800 + remaining)  # age 0 to 800 ms
 
         elif self.state == STATE_RESULTS and self.session is not None:  # the end screen
             log_name = self.last_log_path.name if self.last_log_path else "not written"  # only the file name fits
@@ -633,7 +638,7 @@ class BeatLanesApp:  # the whole game, wired together
     def _screenshot_ready(self) -> bool:  # is the asked-for screen on show?
         if self.state != self.screenshot_state:  # wrong screen
             return False  # keep looping
-        if self.state in (STATE_PLAY, STATE_CALIBRATE):  # wait for the moment
+        if self.state in (STATE_PLAY, STATE_CALIBRATE, STATE_COUNTDOWN):  # timed screens
             return self.clock.song_time_ms() >= self.screenshot_at_ms  # wait for the moment
         return True  # title and results are static screens
 

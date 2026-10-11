@@ -129,5 +129,23 @@ class AppTests(unittest.TestCase):  # one app per test, on a clock the test cont
         self.assertTrue(self.app.new_best)  # and the results screen says so
 
 
+    def test_the_digits_only_show_in_the_three_seconds_before_the_first_note(self):  # the stuck-on-3 fix
+        # the first note sits at 8 s, so the old gate (remaining > 0) drew the
+        # countdown through the whole four bar intro and the digit sat on its
+        # 3 clamp for five seconds before the numbers ever moved
+        with mock.patch("beatlanes.app.render.draw_countdown") as digits:  # spy on the numbers
+            self.press(pygame.K_SPACE)  # start the run, song time is 0
+            self.now += 2_000  # two seconds into the intro
+            self.app._update()  # a frame at 2 s
+            self.app._draw()  # draw that frame
+            self.assertEqual(digits.call_count, 0)  # too early: quiet intro, no digit
+            self.now += 3_100  # 5.1 s, inside the three second window
+            self.app._update()  # a frame at 5.1 s
+            self.app._draw()  # draw it
+            self.assertEqual(digits.call_count, 1)  # now the digits show
+            remaining = digits.call_args[0][1]  # what the renderer was told
+            self.assertLessEqual(remaining, 3_000)  # never outside the window again
+
+
 if __name__ == "__main__":  # run directly
     unittest.main()  # run the tests

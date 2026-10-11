@@ -119,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:  # argv override for tests
     parser.add_argument("--at", type=float, default=12_000.0, help="song time for --screenshot, in ms")  # when to capture
     parser.add_argument(  # another flag
         "--shot-state",  # which screen --screenshot should capture
-        choices=("title", "play", "results", "calibrate"),  # the four screens
+        choices=("title", "countdown", "play", "results", "calibrate"),  # the screens a capture can wait for
         default="play",  # play is the usual shot
         help="which screen to capture or record",  # shown by --help
     )  # flag done
