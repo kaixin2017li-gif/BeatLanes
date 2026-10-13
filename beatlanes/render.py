@@ -636,6 +636,7 @@ def keycap(  # one keyboard key, drawn the same on every screen
     size: int = 13,  # label size
     tint: Optional[Colour] = None,  # lane keys get their lane colour
     lit: float = 0.0,  # 0 resting, 1 pressed
+    dim: bool = False,  # secondary caps sit darker so their letters still read over busy backgrounds
 ) -> pygame.Rect:  # where it went
     width = _keycap_width(label, size)  # fitted to the label
     height = size * 2 + 6  # tall enough for the label and the shadow
@@ -643,7 +644,8 @@ def keycap(  # one keyboard key, drawn the same on every screen
     accent = tint or config.TEXT_MUTED  # outline colour
     pygame.draw.rect(surface, _darken(accent, 0.8), rect.move(0, 3), border_radius=7)  # the shadow under the cap
     pressed = rect.move(0, int(2 * lit))  # a pressed key sinks a little
-    face = _lerp_colour(config.RECEPTOR_FILL, _darken(accent, 0.35), lit)  # the cap top
+    base = config.HIGHWAY if dim else config.RECEPTOR_FILL  # secondary caps use the darkest panel colour
+    face = _lerp_colour(base, _darken(accent, 0.35), lit)  # the cap top
     pygame.draw.rect(surface, face, pressed, border_radius=7)  # the cap
     pygame.draw.rect(surface, _lerp_colour(_darken(accent, 0.35), accent, max(lit, 0.4)), pressed, width=1, border_radius=7)  # its outline
     label_colour = _lerp_colour(_lighten(accent, 0.4), (255, 255, 255), lit)  # the letter
@@ -658,6 +660,7 @@ def hint_row(  # a centred row of [KEY] action pairs
     y: int,  # top of the caps
     size: int = 13,  # label size
     alpha: int = 255,  # the action words can pulse
+    dim: bool = False,  # secondary rows read better dark with the brighter word colour
 ) -> None:  # draws, returns nothing
     gap_keys, gap_label, gap_items = 4, 9, 34  # spacing between caps, before the word, between pairs
     widths = []  # each pair's width, measured before drawing so the row can centre
@@ -665,12 +668,13 @@ def hint_row(  # a centred row of [KEY] action pairs
         caps = sum(_keycap_width(key, size) for key in keys) + gap_keys * (len(keys) - 1)  # the caps
         widths.append(caps + gap_label + text_width(action, size + 1, bold=True))  # caps plus the word
     x = centre_x - (sum(widths) + gap_items * (len(items) - 1)) / 2.0  # start so the whole row is centred
+    word_colour = config.TEXT_MUTED if dim else config.TEXT  # the quieter colour for the secondary row
     for (keys, action), width in zip(items, widths):  # draw
         cursor = x  # pen for this pair
         for key in keys:  # one cap per key
-            cursor = keycap(surface, key, (int(cursor), y), size=size).right + gap_keys  # next cap goes after this one
+            cursor = keycap(surface, key, (int(cursor), y), size=size, dim=dim).right + gap_keys  # next cap goes after this one
         word_y = y + (size * 2 + 6 - font(size + 1, bold=True).get_height()) // 2  # vertically centred on the caps
-        text(surface, action, (cursor - gap_keys + gap_label, word_y), size=size + 1, colour=config.TEXT, bold=True, alpha=alpha)  # the word, beside the caps
+        text(surface, action, (cursor - gap_keys + gap_label, word_y), size=size + 1, colour=word_colour, bold=True, alpha=alpha)  # the word, beside the caps
         x += width + gap_items  # next pair
 
 
@@ -1198,7 +1202,18 @@ def draw_title(  # the waiting screen
     extra = [(("TAB",), "timing overlay in play")]  # always true
     if picker:  # only worth saying when there is a choice
         extra.insert(0, (("LEFT", "RIGHT"), "change chart"))  # arrows first
-    hint_row(surface, extra, centre_x, 546, size=10)  # quieter second row
+    # the second row used to be 10px caps in the dimmest colour, sitting right
+    # on the drifting notes and the key beams - on a real screen the words
+    # vanished. now 12px on a darker cap with a strip of highway behind the
+    # whole row, so the letters always have a quiet background to sit on
+    row_sizes = [text_width(action, 13, bold=True) + sum(_keycap_width(key, 12) for key in keys) + 4 * (len(keys) - 1) + 9 for keys, action in extra]  # measure before the strip
+    strip = pygame.Rect(int(centre_x - (sum(row_sizes) + 34 * (len(extra) - 1)) / 2.0) - 16, 544, int(sum(row_sizes) + 34 * (len(extra) - 1)) + 32, 38)  # behind the caps and words
+    panel(surface, strip, alpha=205, radius=10)  # the quiet strip
+    hint_row(surface, extra, centre_x, 549, size=12, dim=True)  # the redesigned second row
+    # the week 11 reminder from class, in the professor's words: the point of
+    # the prototype is to learn, not to ship a commercial product
+    text(surface, '"BUILDING TO LEARN"', (centre_x, 606), size=11, colour=config.TEXT_MUTED, bold=True, align="center")  # the phrase itself
+    text(surface, "the prototype is for learning, not for shipping", (centre_x, 624), size=10, colour=config.TEXT_DIM, align="center")  # what it means
     text(surface, f"v{__version__}  ·  week 11 build", (config.WINDOW_WIDTH - 16, config.WINDOW_HEIGHT - 24), size=11, colour=config.TEXT_DIM, align="right")  # build tag, bottom right
 
 
