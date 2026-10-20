@@ -16,7 +16,7 @@ from typing import Callable, Optional, Sequence  # Callable is the injectable cl
 
 import pygame  # window, input, clock
 
-from . import audio, config, render  # sound, settings, drawing
+from . import audio, config, hidpi, render  # sound, settings, screen scale, drawing
 from .calibration import CalibrationRun, load_calibration, save_calibration  # the metronome test
 from .chart import Chart, load_chart  # the chart being played
 from .judge import Verdict  # verdict names
@@ -106,6 +106,7 @@ class BeatLanesApp:  # the whole game, wired together
         record_fps: int = config.FPS,  # recording frame rate
         record_scale: int = 1,  # recording pixel scale
         log_path: Optional[Path | str] = None,  # where the CSV goes
+        ui_scale: Optional[float] = None,  # None: follow the Windows display scale (1.0 elsewhere)
     ) -> None:  # stores settings, opens nothing yet
         # chart selection: the title screen cycles config.CHARTS with LEFT/RIGHT
         self.chart_paths = list(config.CHARTS)  # the charts the player can pick
@@ -116,6 +117,7 @@ class BeatLanesApp:  # the whole game, wired together
         self.song_path = song_path  # the backing track  # None means the default from config
         self.enable_audio = enable_audio  # False for silent runs
         self.log_path = log_path  # where the tap log goes  # None means the timestamped default
+        self.ui_scale = ui_scale  # a forced scale from --scale, or None to ask the screen
 
         # An automatic run is one nobody sits in front of: taps are supplied, or
         # it only exists to capture a frame. Automatic runs go headless unless
@@ -192,9 +194,12 @@ class BeatLanesApp:  # the whole game, wired together
         # pygame objects, created in _setup
         self.screen: Optional[pygame.Surface] = None  # the window
         # everything is drawn onto this offscreen frame first, then blitted to
-        # the window. Depth 24 matters: on macOS the window surface carries an
-        # alpha mask, and screenshots taken from it come out transparent. A
-        # 24-bit surface has no alpha mask on any driver.
+        # the window. It must have no alpha mask: on macOS the window surface
+        # carries one, and screenshots taken from it come out transparent. It
+        # was 24-bit for that reason; it is now 32-bit with the alpha mask set
+        # to 0, which is just as opaque, and pygame blends translucent sprites
+        # onto 32-bit pixels about five times faster. That matters once the
+        # frame is 1440x960 on a 150% screen instead of 960x640.
         self.frame: Optional[pygame.Surface] = None
         self.frame_clock = pygame.time.Clock()  # caps the frame rate
         self.click = None  # the metronome click sound
@@ -203,13 +208,27 @@ class BeatLanesApp:  # the whole game, wired together
 
     # --- lifecycle --------------------------------------------------------
     def _setup(self) -> None:  # open the window, and the mixer when wanted
+        real_window = os.environ.get("SDL_VIDEODRIVER") != "dummy"  # tests and headless runs have no screen to match
+        # must happen before pygame opens the display: Windows decides at the
+        # first window whether to stretch it. See hidpi.py for the blur story.
+        desktop_scale = hidpi.claim_dpi_awareness() if real_window else 1.0  # 1.5 on a 150% Windows screen
         pygame.init()  # start pygame itself
+        if self.ui_scale is not None:  # --scale wins
+            scale = self.ui_scale  # as asked
+        elif real_window:  # match the screen, but keep the window on it
+            sizes = pygame.display.get_desktop_sizes()  # real pixels once the process is DPI aware
+            scale = hidpi.fit_scale(desktop_scale, sizes[0] if sizes else (0, 0))  # capped to the first screen
+        else:  # headless: the design size, so captures and tests do not depend on the machine
+            scale = 1.0  # 960x640
+        render.set_ui_scale(scale)  # window, lanes and fonts all follow, caches rebuilt
         pygame.display.set_caption(config.CAPTION)  # the window title
         pygame.display.set_icon(render.make_icon())  # before set_mode, some platforms only read it then
+        # no SCALED flag: the frame is already drawn at the screen's real size,
+        # so nothing should stretch it again
         self.screen = pygame.display.set_mode((config.WINDOW_WIDTH, config.WINDOW_HEIGHT))  # the window, size from config
         self._disable_text_input()  # see the note on the method, this is the week 11 key fix
         self.frame = pygame.Surface(  # the offscreen frame everything is drawn on
-            (config.WINDOW_WIDTH, config.WINDOW_HEIGHT), 0, 24  # 24-bit: no alpha
+            (config.WINDOW_WIDTH, config.WINDOW_HEIGHT), 0, 32, (0xFF0000, 0x00FF00, 0x0000FF, 0)  # 32-bit, alpha mask 0: opaque
         )  # sized like the window
         if self.enable_audio and not self.headless:  # only real runs open the mixer
             self.mixer_ok = audio.init_mixer()  # may come back False

@@ -18,8 +18,16 @@ CHARTS = (CHART_PATH, CHART_2_PATH)  # changed using the LEFT RIGHT arrow keys o
 CALIBRATION_PATH = PROJECT_DIR / "calibration.json"  # stores your latency correction
 
 # --- window -----------------------------------------------------------------
-WINDOW_WIDTH = 960  # pixels wide the window is
-WINDOW_HEIGHT = 640  # pixels tall the window is
+# Everything is laid out on a 960x640 design. UI_SCALE turns design pixels into
+# screen pixels. At 1.0 the frame is 960x640, as it always was. On a Windows
+# screen set to 150% the game used to draw 960x640 and let Windows stretch the
+# window to 1440x960, which is what made the text blurry. app.py now asks
+# Windows for the real scale and draws at it, so every pixel lands 1:1.
+DESIGN_WIDTH = 960  # the layout's width, before scaling
+DESIGN_HEIGHT = 640  # the layout's height, before scaling
+UI_SCALE = 1.0  # design px -> screen px, set by apply_ui_scale
+WINDOW_WIDTH = DESIGN_WIDTH  # pixels wide the frame is, scaled
+WINDOW_HEIGHT = DESIGN_HEIGHT  # pixels tall the frame is, scaled
 FPS = 60  # caps fps
 CAPTION = "BeatLanes - four lane rhythm prototype"  # name of window
 
@@ -82,3 +90,35 @@ PERFECT_COLOUR = (118, 230, 190)  # text for PERFECT
 GOOD_COLOUR = (240, 208, 118)  # text for GOOD
 MISS_COLOUR = (236, 112, 112)  # text for MISS
 PANEL = (14, 18, 38)  # text boxes
+
+# --- ui scale ---------------------------------------------------------------
+# The pixel sizes above are design pixels. A scaled run multiplies them once,
+# at startup, so session.py and render.py keep reading plain config values and
+# never have to know about the scale. Timing values are not touched.
+_DESIGN_PIXELS = {  # name -> design value, read by apply_ui_scale
+    "LANE_WIDTH": LANE_WIDTH,  # 120
+    "LANE_GAP": LANE_GAP,  # 6
+    "NOTE_WIDTH": NOTE_WIDTH,  # 102
+    "NOTE_HEIGHT": NOTE_HEIGHT,  # 20
+}  # whole pixels, rounded after scaling
+_DESIGN_POSITIONS = {  # the two heights notes travel between, kept as floats
+    "NOTE_SPAWN_Y": NOTE_SPAWN_Y,  # 0.0
+    "JUDGE_LINE_Y": JUDGE_LINE_Y,  # 520.0
+}  # floats, so the scroll speed stays exact
+
+
+def apply_ui_scale(scale: float) -> None:  # resize everything that is measured in pixels
+    """Set UI_SCALE and recompute the window and lane sizes from the design.
+
+    Always starts from the design values, so calling it twice with different
+    scales does not compound. render.set_ui_scale calls this and also clears
+    the sprite caches, which were built at the old size.
+    """
+    global UI_SCALE, WINDOW_WIDTH, WINDOW_HEIGHT  # module settings, rebound here
+    UI_SCALE = float(scale)  # the new factor
+    WINDOW_WIDTH = int(round(DESIGN_WIDTH * UI_SCALE))  # e.g. 1440 at 1.5
+    WINDOW_HEIGHT = int(round(DESIGN_HEIGHT * UI_SCALE))  # e.g. 960 at 1.5
+    for name, value in _DESIGN_PIXELS.items():  # lane and note sizes
+        globals()[name] = int(round(value * UI_SCALE))  # whole pixels
+    for name, value in _DESIGN_POSITIONS.items():  # spawn and judgement heights
+        globals()[name] = value * UI_SCALE  # stays a float

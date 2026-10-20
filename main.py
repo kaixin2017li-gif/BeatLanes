@@ -139,6 +139,12 @@ def main(argv: list[str] | None = None) -> int:  # argv override for tests
         help="keep a real window and audio device even for an automatic run",  # shown by --help
     )  # flag done
     parser.add_argument(  # another flag
+        "--scale",  # draw everything bigger, at real pixels
+        type=float,  # 1.5 means 1440x960
+        default=None,  # None: follow the Windows display scale, 1.0 elsewhere
+        help="UI scale, e.g. 1.5 for a 1440x960 window (default: match the Windows display scale)",  # shown by --help
+    )  # flag done
+    parser.add_argument(  # another flag
         "--record",  # write the run to an mp4
         type=Path,  # a path, not a string
         default=None,  # off by default
@@ -152,6 +158,9 @@ def main(argv: list[str] | None = None) -> int:  # argv override for tests
         help="pixel scale for --record",  # hd by default
     )  # shown by --help
     args = parser.parse_args(argv)  # flag done
+
+    if args.scale is not None and not 0.5 <= args.scale <= 4.0:  # a typo like 15 would open a giant window
+        parser.error("--scale must be between 0.5 and 4")  # exits with a usage message
 
     if args.selftest:  # the headless test run
         return run_selftest(args)  # the headless run, exit code decides
@@ -182,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:  # argv override for tests
         screenshot_at_ms=args.at,  # when to capture
         screenshot_state=args.shot_state,  # which screen
         log_path=args.log,  # may be None
+        ui_scale=args.scale,  # None asks the screen
     )  # app ready
     app.debug = args.debug  # overlay if asked
     return app.run()  # the game loop, its return is the exit code

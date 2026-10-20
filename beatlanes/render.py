@@ -16,6 +16,13 @@ cached.
 Week 11 pass: one highway instead of four loose strips, a side HUD so the
 playfield stays clear, key caps drawn the same way on every screen, a MISS
 popup, and a timing strip on the results screen.
+
+Every length here is written in design pixels (the 960x640 layout) and goes
+through _s() on its way to the screen, so the same code draws a sharp frame at
+any UI_SCALE. Font sizes and letter tracking stay in design pixels all the way
+into font() and tracked_text(), which scale them themselves. Everything else a
+helper takes - positions, rects, radii, line widths - is already in screen
+pixels.
 """
 
 from __future__ import annotations  # lets the type hints use modern syntax
@@ -62,6 +69,26 @@ LOGO_GRADIENT = (config.HIT_FLASH, config.ACCENT_VIOLET, config.ACCENT_PINK)  # 
 
 _FONTS: dict[tuple[int, bool, bool], pygame.font.Font] = {}  # the font cache, keyed by size/bold/mono
 
+
+def _s(value: float) -> int:  # design px -> screen px, whole
+    """A design-pixel length in screen pixels. At UI_SCALE 1.0 it is the same number."""
+    return int(round(value * config.UI_SCALE))  # rounded, so 1 px at 1.5x becomes 2 and not 1
+
+
+def _sf(value: float) -> float:  # design px -> screen px, kept fractional
+    return value * config.UI_SCALE  # for speeds and eased distances that get rounded later
+
+
+def set_ui_scale(scale: float) -> None:  # change the scale and drop everything built at the old one
+    """Called by the app before the window opens (and by the tests)."""
+    changed = float(scale) != config.UI_SCALE  # the tests open many apps at the same scale
+    config.apply_ui_scale(scale)  # window, lanes, notes, judgement line
+    if not changed:  # everything cached is still the right size
+        return  # keep it
+    _FONTS.clear()  # font objects are per pixel size
+    _TEXT_CACHE.clear()  # rendered strings
+    _SPRITES.clear()  # highway, notes, glows, panels
+
 # first one found wins. segoeui is there for Windows, where avenir and
 # helvetica do not exist and the old list fell all the way back to arial
 UI_FONT = ("avenirnext", "segoeui", "helveticaneue", "helvetica", "arial")  # ui text
@@ -77,9 +104,15 @@ def font(size: int, bold: bool = False, mono: bool = False) -> pygame.font.Font:
         return cached  # done
     family = ",".join(MONO_FONT if mono else UI_FONT)  # pick the family list
     try:  # fall back to pygame's built-in font if sys fonts fail
-        loaded = pygame.font.SysFont(family, size, bold=bold)  # try the system font first
+        loaded = pygame.font.SysFont(family, max(1, _s(size)), bold=bold)  # try the system font first, at the scaled size
     except Exception:  # any font problem lands here
-        loaded = pygame.font.Font(None, size)  # the built-in fallback
+        loaded = pygame.font.Font(None, max(1, _s(size)))  # the built-in fallback
+    if not _FONTS:  # the first font since pygame started
+        # pygame.quit() frees every font, and a cached one used after the next
+        # pygame.init() crashes the interpreter (the tests open and close
+        # pygame many times). pygame calls each registered quit function once,
+        # so it is registered again with the first font of every session.
+        pygame.register_quit(_FONTS.clear)  # forget them when pygame shuts down
     _FONTS[key] = loaded  # remember it
     return loaded  # fresh build, now cached
 
@@ -107,8 +140,8 @@ HIGHWAY_PAD = 12  # how far the highway sticks out past the outer lanes
 
 
 def highway_rect() -> pygame.Rect:  # the dark strip all four lanes sit on
-    left = int(lane_left()) - HIGHWAY_PAD  # a little wider than the lanes
-    return pygame.Rect(left, 0, int(lanes_width()) + HIGHWAY_PAD * 2, config.WINDOW_HEIGHT)  # full height
+    left = int(lane_left()) - _s(HIGHWAY_PAD)  # a little wider than the lanes
+    return pygame.Rect(left, 0, int(lanes_width()) + _s(HIGHWAY_PAD) * 2, config.WINDOW_HEIGHT)  # full height
 
 
 def y_for_time(time_ms: float, song_ms: float) -> float:  # screen y of a moment in the song
@@ -123,7 +156,7 @@ def y_for_time(time_ms: float, song_ms: float) -> float:  # screen y of a moment
 
 def receptor_rect(index: int) -> pygame.Rect:  # the key slot drawn on the line
     """The key slot on the judgement line for one lane."""
-    rect = pygame.Rect(0, 0, config.NOTE_WIDTH + 8, 38)  # slightly wider than a note
+    rect = pygame.Rect(0, 0, config.NOTE_WIDTH + _s(8), _s(38))  # slightly wider than a note
     rect.center = (int(lane_centre_x(index)), int(config.JUDGE_LINE_Y))  # centred on the line, so notes land in it
     return rect  # caller may need the area
 
@@ -216,10 +249,14 @@ def text(  # draw one line of plain text
     if image is None:  # first time this string shows up
         image = _cache_put(key, font(size, bold=bold, mono=mono).render(message, True, colour))  # render once
     rect = _place(image.get_rect(), position, align)  # where it lands
+    # The reset after a faded draw has to be set_alpha(255). set_alpha(None)
+    # also switches off the per-pixel alpha, so the next full-strength draw of
+    # the same cached image came out as a solid box: the PERFECT popup flashed
+    # as a green slab for a few frames once it had faded out one time.
     if alpha < 255:  # faded text
         image.set_alpha(alpha)  # applied to the cached image, reset below
         surface.blit(image, rect)  # draw it faded
-        image.set_alpha(None)  # put the cached copy back to opaque
+        image.set_alpha(255)  # back to full strength; set_alpha(None) would also switch off the per-pixel alpha
     else:  # the common case
         surface.blit(image, rect)  # put it on screen
     return rect  # done
@@ -246,12 +283,13 @@ def tracked_text(  # letter-spaced text, for the small caps labels
     if image is None:  # build the row
         face = font(size, bold=bold)  # one font for the whole row
         glyphs = [face.render(char, True, colour) for char in message]  # one image per letter
-        width = sum(glyph.get_width() for glyph in glyphs) + tracking * max(0, len(glyphs) - 1)  # total width
+        gap = _s(tracking)  # tracking is a design value, like the size
+        width = sum(glyph.get_width() for glyph in glyphs) + gap * max(0, len(glyphs) - 1)  # total width
         image = pygame.Surface((max(1, width), face.get_height()), pygame.SRCALPHA)  # transparent row
         x = 0  # pen position
         for glyph in glyphs:  # lay them out
             image.blit(glyph, (x, 0))  # stamp the letter
-            x += glyph.get_width() + tracking  # advance with the extra gap
+            x += glyph.get_width() + gap  # advance with the extra gap
         _cache_put(key, image)  # keep it
     rect = _place(image.get_rect(), position, align)  # anchor it
     surface.blit(image, rect)  # draw
@@ -310,11 +348,11 @@ def glow_text(  # text with a soft halo (stamped copies of itself)
     composed = _TEXT_CACHE.get(key)  # built before?
     if composed is None:  # build it
         face = font(size, bold=bold).render(message, True, colour)  # the text itself
-        pad = max(8, size // 4)  # room for the halo, bigger text gets a wider one
+        pad = _s(max(8, size // 4))  # room for the halo, bigger text gets a wider one
         composed = pygame.Surface((face.get_width() + pad * 2, face.get_height() + pad * 2), pygame.SRCALPHA)  # transparent
         halo = composed.copy()  # same size, the glyphs in the glow colour
         halo.blit(font(size, bold=bold).render(message, True, glow), (pad, pad))  # stamped once
-        halo = _blur(halo, max(2, size // 10))  # softened
+        halo = _blur(halo, max(2, _s(size // 10)))  # softened
         composed.blit(halo, (0, 0))  # the glow
         if size < 48:  # small text needs a second layer to show a glow at all
             composed.blit(halo, (0, 0))  # big text glows enough with one
@@ -332,7 +370,7 @@ def glow_text(  # text with a soft halo (stamped copies of itself)
     if alpha < 255:  # fade via alpha
         image.set_alpha(alpha)  # apply the fade
         surface.blit(image, rect)  # draw it
-        image.set_alpha(None)  # the cached stamp goes back to opaque
+        image.set_alpha(255)  # back to full strength, see text() for why not None
     else:  # no fade
         surface.blit(image, rect)  # draw it
     return rect  # done
@@ -355,11 +393,11 @@ def gradient_text(  # the logo: text filled with the accent gradient, plus a glo
         for x in range(width):  # one column at a time
             pygame.draw.line(fill, (*_gradient_at(stops, x / max(1, width - 1)), 255), (x, 0), (x, height))  # this column's colour
         fill.blit(face, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)  # keep the ramp only where the letters are
-        pad = size // 3  # room for the glow
+        pad = _s(size // 3)  # room for the glow
         image = pygame.Surface((width + pad * 2, height + pad * 2), pygame.SRCALPHA)  # transparent
         halo = image.copy()  # the glow is the same coloured letters, blurred
         halo.blit(fill, (pad, pad))  # stamped once
-        halo = _blur(halo, max(3, size // 9))  # softened
+        halo = _blur(halo, max(3, _s(size // 9)))  # softened
         image.blit(halo, (0, 0))  # the glow
         image.blit(fill, (pad, pad))  # the letters on top
         _cache_put(key, image)  # keep it
@@ -396,8 +434,8 @@ def _background_sprite() -> pygame.Surface:  # gradient, stage glow, dust and vi
     # a wide soft ellipse behind the judgement line, like a stage light
     glow = pygame.Surface((width, height), pygame.SRCALPHA)  # translucent layer
     for step in range(18, 0, -1):  # widest and faintest first
-        rect = pygame.Rect(0, 0, 60 + step * 52, 24 + step * 15)  # grows with each step
-        rect.center = (width // 2, int(config.JUDGE_LINE_Y) + 30)  # centred under the line
+        rect = pygame.Rect(0, 0, _s(60 + step * 52), _s(24 + step * 15))  # grows with each step
+        rect.center = (width // 2, int(config.JUDGE_LINE_Y) + _s(30))  # centred under the line
         pygame.draw.ellipse(glow, (*config.ACCENT_VIOLET, 5), rect)  # stacked faint layers read as a blur
     surface.blit(glow, (0, 0))  # stamp the stage light
 
@@ -408,17 +446,17 @@ def _background_sprite() -> pygame.Surface:  # gradient, stage glow, dust and vi
         shade = _lerp_colour(config.BACKGROUND_TOP, config.TEXT_MUTED, rng.uniform(0.15, 0.45))  # mostly faint
         surface.set_at((x, y), shade)  # one pixel
         if rng.random() < 0.15:  # a few bigger ones
-            pygame.draw.circle(surface, shade, (x, y), 1)  # two pixels across
+            pygame.draw.circle(surface, shade, (x, y), _s(1))  # two pixels across
 
     # The vignette is four soft edge gradients. Corners are stamped by two of
     # them, which is exactly the extra darkening a vignette wants there.
     overlay = pygame.Surface((width, height), pygame.SRCALPHA)  # drawn on top of the gradient
-    edge = 150  # how many rows the top/bottom fade covers
+    edge = _s(150)  # how many rows the top/bottom fade covers
     for i in range(edge):  # top and bottom edges
         alpha = int(70 * (1.0 - i / edge) ** 2)  # fades with distance from the edge
         pygame.draw.line(overlay, (0, 0, 0, alpha), (0, i), (width, i))  # top rows
         pygame.draw.line(overlay, (0, 0, 0, alpha), (0, height - 1 - i), (width, height - 1 - i))  # bottom rows
-    side = 240  # how many columns the left/right fade covers
+    side = _s(240)  # how many columns the left/right fade covers
     for i in range(side):  # left and right edges
         alpha = int(60 * (1.0 - i / side) ** 2)  # same idea, slightly weaker
         pygame.draw.line(overlay, (0, 0, 0, alpha), (i, 0), (i, height))  # left columns
@@ -445,19 +483,20 @@ def _highway_sprite() -> pygame.Surface:  # the lane strip with its edges, lane 
         lane = lane_rect(index).move(-road.x, 0)  # lane rect, local to the strip
         shade = config.LANE_FILL if index % 2 == 0 else config.LANE_FILL_ALT  # alternate the shade
         pygame.draw.rect(surface, (*shade, 235), lane)  # fill it
-        tint = _vertical_fade(lane.width, 220, LANE_TINTS[index], 0, 30)  # the lane's colour, strongest at the line
-        surface.blit(tint, (lane.x, int(config.JUDGE_LINE_Y) - 220))  # sits on the receptors
+        tint = _vertical_fade(lane.width, _s(220), LANE_TINTS[index], 0, 30)  # the lane's colour, strongest at the line
+        surface.blit(tint, (lane.x, int(config.JUDGE_LINE_Y) - tint.get_height()))  # sits on the receptors
     for index in range(1, config.LANE_COUNT):  # the separators between lanes
         x = int(lane_rect(index).x - road.x - config.LANE_GAP / 2)  # the middle of the gap
-        pygame.draw.line(surface, (*config.LANE_EDGE, 120), (x, 0), (x, road.height), 1)  # a thin quiet line
+        pygame.draw.line(surface, (*config.LANE_EDGE, 120), (x, 0), (x, road.height), _s(1))  # a thin quiet line
 
     for x, direction in ((0, 1), (road.width - 1, -1)):  # the two side rails
-        for step in range(8):  # a short glow fading inwards
-            alpha = int(90 * (1.0 - step / 8.0) ** 2)  # strongest at the rail
+        rail = _s(8)  # how far the glow reaches in
+        for step in range(rail):  # a short glow fading inwards
+            alpha = int(90 * (1.0 - step / float(rail)) ** 2)  # strongest at the rail
             pygame.draw.line(surface, (*config.HIT_FLASH, alpha), (x + step * direction, 0), (x + step * direction, road.height))  # one column of glow
-        pygame.draw.line(surface, (*_lighten(config.HIT_FLASH, 0.2), 200), (x, 0), (x, road.height))  # the rail itself
+        pygame.draw.line(surface, (*_lighten(config.HIT_FLASH, 0.2), 200), (x, 0), (x, road.height), _s(1))  # the rail itself
 
-    top_fade = _vertical_fade(road.width, 190, config.BACKGROUND_TOP, 255, 0)  # notes come out of the dark
+    top_fade = _vertical_fade(road.width, _s(190), config.BACKGROUND_TOP, 255, 0)  # notes come out of the dark
     surface.blit(top_fade, (0, 0))  # over the top of the strip
     _SPRITES[key] = surface  # cache it
     return surface  # finished strip
@@ -468,7 +507,7 @@ def _top_fade_sprite() -> pygame.Surface:  # the same top fade, stamped again ov
     cached = _SPRITES.get(key)  # built before?
     if cached is None:  # build it
         road = highway_rect()  # same width as the strip
-        cached = _vertical_fade(road.width, 150, _lerp_colour(config.BACKGROUND_TOP, config.HIGHWAY, 0.3), 235, 0)  # dark at the very top
+        cached = _vertical_fade(road.width, _s(150), _lerp_colour(config.BACKGROUND_TOP, config.HIGHWAY, 0.3), 235, 0)  # dark at the very top
         _SPRITES[key] = cached  # cache it
     return cached  # done
 
@@ -478,7 +517,7 @@ def _bottom_fade_sprite() -> pygame.Surface:  # darkens the deck under the recep
     cached = _SPRITES.get(key)  # built before?
     if cached is None:  # build it
         road = highway_rect()  # same width as the strip
-        depth = config.WINDOW_HEIGHT - int(config.JUDGE_LINE_Y) - 20  # from just under the receptors to the bottom
+        depth = config.WINDOW_HEIGHT - int(config.JUDGE_LINE_Y) - _s(20)  # from just under the receptors to the bottom
         cached = _vertical_fade(road.width, depth, config.BACKGROUND_BOTTOM, 120, 245)  # notes past the line sink away
         _SPRITES[key] = cached  # cache it
     return cached  # done
@@ -500,19 +539,19 @@ def _note_sprite(tint: Colour) -> pygame.Surface:  # one note image per lane tin
 
     # Round the corners by multiplying against a rounded mask.
     mask = pygame.Surface((width, height), pygame.SRCALPHA)  # a rounded mask
-    pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=7)  # rounded shape
+    pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=_s(7))  # rounded shape
     gradient.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)  # multiply keeps only the rounded part
 
     # the core: a white line through the middle, the part the eye tracks
-    pygame.draw.line(gradient, (255, 255, 255, 235), (10, height // 2), (width - 11, height // 2), 2)  # bright core
-    pygame.draw.line(gradient, (*_lighten(tint, 0.8), 200), (6, 1), (width - 7, 1), 1)  # glossy top edge
+    pygame.draw.line(gradient, (255, 255, 255, 235), (_s(10), height // 2), (width - _s(11), height // 2), _s(2))  # bright core
+    pygame.draw.line(gradient, (*_lighten(tint, 0.8), 200), (_s(6), _s(1)), (width - _s(7), _s(1)), _s(1))  # glossy top edge
     _SPRITES[key] = gradient  # cache it
     return gradient  # the finished note image
 
 
 def _note_glow(tint: Colour) -> pygame.Surface:  # the halo under a note
     """A soft halo a little larger than the note, stamped underneath it."""
-    pad = 16  # how far the halo sticks out
+    pad = _s(16)  # how far the halo sticks out
     key = ("note_glow", config.NOTE_WIDTH, config.NOTE_HEIGHT, tint)  # cache key
     cached = _SPRITES.get(key)  # built before?
     if cached is not None:  # same cache check as the note sprite
@@ -520,9 +559,9 @@ def _note_glow(tint: Colour) -> pygame.Surface:  # the halo under a note
 
     width, height = config.NOTE_WIDTH + pad * 2, config.NOTE_HEIGHT + pad * 2  # halo size
     glow = pygame.Surface((width, height), pygame.SRCALPHA)  # translucent
-    body = pygame.Rect(pad - 2, pad - 2, config.NOTE_WIDTH + 4, config.NOTE_HEIGHT + 4)  # a little bigger than the note
+    body = pygame.Rect(pad - _s(2), pad - _s(2), config.NOTE_WIDTH + _s(4), config.NOTE_HEIGHT + _s(4))  # a little bigger than the note
     pygame.draw.rect(glow, (*tint, 120), body, border_radius=body.height // 2)  # a pill in the lane colour
-    glow = _blur(glow, 5)  # softened into a halo
+    glow = _blur(glow, _s(5))  # softened into a halo
     _SPRITES[key] = glow  # cache it
     return glow  # finished halo
 
@@ -531,7 +570,7 @@ def _beam_sprite(lane: int) -> pygame.Surface:  # the column of light above a pr
     key = ("beam", lane)  # one per lane
     cached = _SPRITES.get(key)  # built before?
     if cached is None:  # build it
-        cached = _vertical_fade(config.LANE_WIDTH, 240, _lighten(LANE_TINTS[lane], 0.15), 0, 110)  # brightest at the key
+        cached = _vertical_fade(config.LANE_WIDTH, _s(240), _lighten(LANE_TINTS[lane], 0.15), 0, 110)  # brightest at the key
         _SPRITES[key] = cached  # cache it
     return cached  # alpha is set per frame by the caller
 
@@ -541,9 +580,10 @@ def _spark_sprite(tint: Colour) -> pygame.Surface:  # one particle of a hit burs
     cached = _SPRITES.get(key)  # built before?
     if cached is not None:  # the same two lines as every builder here
         return cached  # reuse
-    spark = pygame.Surface((12, 12), pygame.SRCALPHA)  # small translucent dot
-    pygame.draw.circle(spark, (*tint, 70), (6, 6), 5)  # soft outer
-    pygame.draw.circle(spark, (*_lighten(tint, 0.7), 240), (6, 6), 2)  # bright centre
+    side = _s(12)  # the dot's box
+    spark = pygame.Surface((side, side), pygame.SRCALPHA)  # small translucent dot
+    pygame.draw.circle(spark, (*tint, 70), (side // 2, side // 2), _s(5))  # soft outer
+    pygame.draw.circle(spark, (*_lighten(tint, 0.7), 240), (side // 2, side // 2), _s(2))  # bright centre
     _SPRITES[key] = spark  # cache it
     return spark  # finished dot
 
@@ -553,10 +593,12 @@ def _ring_sprite(tint: Colour) -> pygame.Surface:  # the ring of a hit burst
     cached = _SPRITES.get(key)  # built before?
     if cached is not None:  # cache check again, same reason
         return cached  # reuse it
-    ring = pygame.Surface((128, 128), pygame.SRCALPHA)  # translucent
-    pygame.draw.circle(ring, (*tint, 150), (64, 64), 56, width=8)  # a thick ring
-    ring = _blur(ring, 4)  # softened into a glow
-    pygame.draw.circle(ring, (*_lighten(tint, 0.6), 240), (64, 64), 54, width=2)  # crisp ring on top
+    side = _s(128)  # the sprite's box; it is resized per frame, this only sets how sharp it stays
+    middle = (side // 2, side // 2)  # its centre
+    ring = pygame.Surface((side, side), pygame.SRCALPHA)  # translucent
+    pygame.draw.circle(ring, (*tint, 150), middle, _s(56), width=_s(8))  # a thick ring
+    ring = _blur(ring, _s(4))  # softened into a glow
+    pygame.draw.circle(ring, (*_lighten(tint, 0.6), 240), middle, _s(54), width=_s(2))  # crisp ring on top
     _SPRITES[key] = ring  # cache it
     return ring  # finished ring
 
@@ -571,12 +613,12 @@ def _panel_sprite(width: int, height: int, radius: int, alpha: int, edge: Colour
     image = pygame.Surface((width, height), pygame.SRCALPHA)  # translucent
     rect = image.get_rect()  # the whole sprite
     pygame.draw.rect(image, (*config.PANEL, alpha), rect, border_radius=radius)  # tinted fill
-    sheen = _vertical_fade(width, min(height, 60), (255, 255, 255), 10, 0)  # a faint light from above
+    sheen = _vertical_fade(width, min(height, _s(60)), (255, 255, 255), 10, 0)  # a faint light from above
     mask = pygame.Surface(sheen.get_size(), pygame.SRCALPHA)  # keep the sheen inside the corners
     pygame.draw.rect(mask, (255, 255, 255, 255), rect, border_radius=radius)  # same rounded shape
     sheen.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)  # trimmed to the panel
     image.blit(sheen, (0, 0))  # on top of the fill
-    pygame.draw.rect(image, (*edge, min(255, alpha)), rect, width=1, border_radius=radius)  # a 1 px edge
+    pygame.draw.rect(image, (*edge, min(255, alpha)), rect, width=_s(1), border_radius=radius)  # a 1 px edge
     _SPRITES[key] = image  # cache it
     return image  # finished panel
 
@@ -619,14 +661,15 @@ def panel(  # a rounded card
     surface: pygame.Surface,  # where to draw
     rect: pygame.Rect,  # the box
     alpha: int = 225,  # how solid the card is
-    radius: int = 14,  # corner rounding
+    radius: Optional[int] = None,  # corner rounding in screen px, None for the usual 14 design px
     edge: Colour = config.LANE_EDGE,  # outline colour
 ) -> None:  # draws, returns nothing
+    radius = _s(14) if radius is None else radius  # the default card corner
     surface.blit(_panel_sprite(rect.width, rect.height, radius, alpha, edge), rect.topleft)  # stamped from cache
 
 
 def _keycap_width(label: str, size: int) -> int:  # how wide a key cap will be
-    return max(size * 2 + 6, text_width(label, size, bold=True) + 20)  # never narrower than a square-ish cap
+    return max(_s(size * 2 + 6), text_width(label, size, bold=True) + _s(20))  # never narrower than a square-ish cap
 
 
 def keycap(  # one keyboard key, drawn the same on every screen
@@ -639,15 +682,15 @@ def keycap(  # one keyboard key, drawn the same on every screen
     dim: bool = False,  # secondary caps sit darker so their letters still read over busy backgrounds
 ) -> pygame.Rect:  # where it went
     width = _keycap_width(label, size)  # fitted to the label
-    height = size * 2 + 6  # tall enough for the label and the shadow
+    height = _s(size * 2 + 6)  # tall enough for the label and the shadow
     rect = pygame.Rect(int(topleft[0]), int(topleft[1]), width, height)  # the cap
     accent = tint or config.TEXT_MUTED  # outline colour
-    pygame.draw.rect(surface, _darken(accent, 0.8), rect.move(0, 3), border_radius=7)  # the shadow under the cap
-    pressed = rect.move(0, int(2 * lit))  # a pressed key sinks a little
+    pygame.draw.rect(surface, _darken(accent, 0.8), rect.move(0, _s(3)), border_radius=_s(7))  # the shadow under the cap
+    pressed = rect.move(0, int(_sf(2) * lit))  # a pressed key sinks a little
     base = config.HIGHWAY if dim else config.RECEPTOR_FILL  # secondary caps use the darkest panel colour
     face = _lerp_colour(base, _darken(accent, 0.35), lit)  # the cap top
-    pygame.draw.rect(surface, face, pressed, border_radius=7)  # the cap
-    pygame.draw.rect(surface, _lerp_colour(_darken(accent, 0.35), accent, max(lit, 0.4)), pressed, width=1, border_radius=7)  # its outline
+    pygame.draw.rect(surface, face, pressed, border_radius=_s(7))  # the cap
+    pygame.draw.rect(surface, _lerp_colour(_darken(accent, 0.35), accent, max(lit, 0.4)), pressed, width=_s(1), border_radius=_s(7))  # its outline
     label_colour = _lerp_colour(_lighten(accent, 0.4), (255, 255, 255), lit)  # the letter
     text(surface, label, pressed.center, size=size, colour=label_colour, bold=True, align="middle")  # centred on the cap
     return rect  # for layout
@@ -662,7 +705,7 @@ def hint_row(  # a centred row of [KEY] action pairs
     alpha: int = 255,  # the action words can pulse
     dim: bool = False,  # secondary rows read better dark with the brighter word colour
 ) -> None:  # draws, returns nothing
-    gap_keys, gap_label, gap_items = 4, 9, 34  # spacing between caps, before the word, between pairs
+    gap_keys, gap_label, gap_items = _s(4), _s(9), _s(34)  # spacing between caps, before the word, between pairs
     widths = []  # each pair's width, measured before drawing so the row can centre
     for keys, action in items:  # measure
         caps = sum(_keycap_width(key, size) for key in keys) + gap_keys * (len(keys) - 1)  # the caps
@@ -673,7 +716,7 @@ def hint_row(  # a centred row of [KEY] action pairs
         cursor = x  # pen for this pair
         for key in keys:  # one cap per key
             cursor = keycap(surface, key, (int(cursor), y), size=size, dim=dim).right + gap_keys  # next cap goes after this one
-        word_y = y + (size * 2 + 6 - font(size + 1, bold=True).get_height()) // 2  # vertically centred on the caps
+        word_y = y + (_s(size * 2 + 6) - font(size + 1, bold=True).get_height()) // 2  # vertically centred on the caps
         text(surface, action, (cursor - gap_keys + gap_label, word_y), size=size + 1, colour=word_colour, bold=True, alpha=alpha)  # the word, beside the caps
         x += width + gap_items  # next pair
 
@@ -686,15 +729,15 @@ def chip(  # a small pill with a coloured outline
     size: int = 12,  # text size
     filled: bool = False,  # a solid chip for the badges
 ) -> pygame.Rect:  # where it went
-    width = text_width(message, size, bold=True) + 22  # padded
-    rect = pygame.Rect(0, 0, width, size + 14)  # pill size
+    width = text_width(message, size, bold=True) + _s(22)  # padded
+    rect = pygame.Rect(0, 0, width, _s(size + 14))  # pill size
     rect.center = (int(centre[0]), int(centre[1]))  # centred
     if filled:  # badge style
         pygame.draw.rect(surface, colour, rect, border_radius=rect.height // 2)  # solid
         text(surface, message, rect.center, size=size, colour=config.BACKGROUND_BOTTOM, bold=True, align="middle")  # dark text on it
     else:  # outline style
         pygame.draw.rect(surface, _darken(colour, 0.82), rect, border_radius=rect.height // 2)  # a dim fill
-        pygame.draw.rect(surface, _darken(colour, 0.3), rect, width=1, border_radius=rect.height // 2)  # the outline
+        pygame.draw.rect(surface, _darken(colour, 0.3), rect, width=_s(1), border_radius=rect.height // 2)  # the outline
         text(surface, message, rect.center, size=size, colour=colour, bold=True, align="middle")  # the words
     return rect  # for layout
 
@@ -755,7 +798,7 @@ def draw_beat_grid(  # faint lines showing where the beats are
             continue  # skip
         bar_line = beat % beats_per_bar == 0  # start of a bar?
         colour = _lerp_colour(config.BEAT_GRID, config.JUDGE_LINE, 0.35) if bar_line else config.BEAT_GRID  # bar lines a touch stronger
-        pygame.draw.line(surface, colour, (road.x + 2, y), (road.right - 3, y), 2 if bar_line else 1)  # the grid line
+        pygame.draw.line(surface, colour, (road.x + _s(2), y), (road.right - _s(3), y), _s(2) if bar_line else _s(1))  # the grid line
 
 
 def _press_strength(lane: int, presses: dict[int, float], held: Iterable[int], song_ms: float, fade_ms: float) -> float:  # 0..1 for a key's light
@@ -788,7 +831,7 @@ def draw_lane_beams(  # the light that rises from a pressed key
         beam = _beam_sprite(lane)  # cached column of light
         beam.set_alpha(int(255 * strength))  # this frame's strength
         surface.blit(beam, (lane_rect(lane).x, int(config.JUDGE_LINE_Y) - beam.get_height()))  # stands on the key
-        beam.set_alpha(None)  # leave the cache opaque
+        beam.set_alpha(255)  # leave the cache at full strength, see text()
 
 
 def draw_combo(surface: pygame.Surface, session: PlaySession, song_ms: float) -> None:  # the big combo behind the notes
@@ -805,8 +848,8 @@ def draw_combo(surface: pygame.Surface, session: PlaySession, song_ms: float) ->
     else:  # small combo stays white
         colour = config.TEXT  # plain
     centre_x = config.WINDOW_WIDTH / 2.0  # over the middle of the highway
-    glow_text(surface, str(score.combo), (centre_x, 214), size=70, colour=colour, glow=colour, align="midbottom", scale=pop, alpha=120)  # quiet, the notes go over it
-    tracked_text(surface, "COMBO", (centre_x, 204), size=12, colour=_darken(colour, 0.35), tracking=5, align="center")  # the label under it
+    glow_text(surface, str(score.combo), (centre_x, _s(214)), size=70, colour=colour, glow=colour, align="midbottom", scale=pop, alpha=120)  # quiet, the notes go over it
+    tracked_text(surface, "COMBO", (centre_x, _s(204)), size=12, colour=_darken(colour, 0.35), tracking=5, align="center")  # the label under it
 
 
 def draw_notes(surface: pygame.Surface, session: PlaySession, song_ms: float) -> None:  # the falling notes
@@ -827,7 +870,7 @@ def draw_notes(surface: pygame.Surface, session: PlaySession, song_ms: float) ->
         distance = abs(note.time_ms - song_ms)  # how close to its moment
         if distance <= config.GOOD_MS:  # inside GOOD: highlight it
             edge = _lerp_colour(config.NOTE_EDGE, tint, distance / config.GOOD_MS)  # brighter as it nears
-            pygame.draw.rect(surface, edge, note_rect.inflate(2, 2), width=2, border_radius=8)  # the highlight edge
+            pygame.draw.rect(surface, edge, note_rect.inflate(_s(2), _s(2)), width=_s(2), border_radius=_s(8))  # the highlight edge
 
 
 def _draw_hit_burst(surface: pygame.Surface, lane: int, age_ms: float) -> None:  # ring + sparks out of the receptor
@@ -840,7 +883,7 @@ def _draw_hit_burst(surface: pygame.Surface, lane: int, age_ms: float) -> None: 
     centre = receptor_rect(lane).center  # burst origin
 
     ring = _ring_sprite(tint)  # the ring sprite
-    radius = 24 + int(54 * ease)  # expands out
+    radius = _s(24) + int(_sf(54) * ease)  # expands out
     scaled = pygame.transform.smoothscale(ring, (radius * 2, radius * 2))  # scaled to the radius
     scaled.set_alpha(int(230 * (1.0 - progress)))  # fades as it expands
     surface.blit(scaled, scaled.get_rect(center=centre))  # centred on the receptor
@@ -850,11 +893,11 @@ def _draw_hit_burst(surface: pygame.Surface, lane: int, age_ms: float) -> None: 
         local = progress - delay  # staggered starts
         if local <= 0:  # not launched yet
             continue  # not drawn
-        distance = speed * (1.0 - (1.0 - min(1.0, local / (1.0 - delay))) ** 3)  # eased travel
-        drop = 26.0 * progress * progress  # sparks fall back like embers
+        distance = _sf(speed) * (1.0 - (1.0 - min(1.0, local / (1.0 - delay))) ** 3)  # eased travel
+        drop = _sf(26.0) * progress * progress  # sparks fall back like embers
         spark.set_alpha(int(255 * (1.0 - progress)))  # fade out
         surface.blit(spark, spark.get_rect(center=(int(centre[0] + dx * distance), int(centre[1] + dy * distance + drop))))  # draw it
-    spark.set_alpha(None)  # leave the cache opaque
+    spark.set_alpha(255)  # leave the cache at full strength, see text()
 
 
 def _judge_glow_sprite() -> pygame.Surface:  # the halo under the judgement line
@@ -862,9 +905,10 @@ def _judge_glow_sprite() -> pygame.Surface:  # the halo under the judgement line
     cached = _SPRITES.get(key)  # built before?
     if cached is None:  # build it
         road = highway_rect()  # the line spans the highway
-        cached = pygame.Surface((road.width, 24), pygame.SRCALPHA)  # translucent strip
-        for row in range(24):  # strongest in the middle row
-            alpha = int(70 * (1.0 - abs(row - 11.5) / 12.0) ** 2)  # falls off both ways
+        height = _s(24)  # how tall the halo is
+        cached = pygame.Surface((road.width, height), pygame.SRCALPHA)  # translucent strip
+        for row in range(height):  # strongest in the middle row
+            alpha = int(70 * (1.0 - abs(row - (height - 1) / 2.0) / (height / 2.0)) ** 2)  # falls off both ways
             pygame.draw.line(cached, (*config.HIT_FLASH, alpha), (0, row), (road.width, row))  # one row
         _SPRITES[key] = cached  # cache it
     return cached  # done
@@ -880,8 +924,9 @@ def draw_receptors(  # the judgement line and the four keys on it
 ) -> None:  # draws, returns nothing
     road = highway_rect()  # the line spans the highway
     y = int(config.JUDGE_LINE_Y)  # the line's height
-    surface.blit(_judge_glow_sprite(), (road.x, y - 12))  # halo first
-    pygame.draw.line(surface, _lighten(config.HIT_FLASH, 0.35), (road.x + 1, y), (road.right - 2, y), 2)  # the line itself
+    halo = _judge_glow_sprite()  # the soft strip under the line
+    surface.blit(halo, (road.x, y - halo.get_height() // 2))  # halo first
+    pygame.draw.line(surface, _lighten(config.HIT_FLASH, 0.35), (road.x + _s(1), y), (road.right - _s(2), y), _s(2))  # the line itself
 
     held = set(held)  # read more than once
     misses = session.last_miss_song_ms if session is not None else {}  # lane -> last miss time
@@ -894,15 +939,15 @@ def draw_receptors(  # the judgement line and the four keys on it
         if miss_at is not None and 0 <= song_ms - miss_at < 300:  # a recent miss
             miss = 1.0 - (song_ms - miss_at) / 300.0  # fades over 300 ms
 
-        pygame.draw.rect(surface, _darken(tint, 0.85), slot.move(0, 4), border_radius=10)  # the shadow under the key
-        cap = slot.move(0, int(3 * lit))  # a pressed key sinks a little
+        pygame.draw.rect(surface, _darken(tint, 0.85), slot.move(0, _s(4)), border_radius=_s(10))  # the shadow under the key
+        cap = slot.move(0, int(_sf(3) * lit))  # a pressed key sinks a little
         face = _lerp_colour(config.RECEPTOR_FILL, _darken(tint, 0.45), lit)  # the key top fills with colour
         face = _lerp_colour(face, _darken(config.MISS_COLOUR, 0.6), miss)  # and goes red on a miss
-        pygame.draw.rect(surface, face, cap, border_radius=10)  # the key top
-        pygame.draw.line(surface, _lighten(face, 0.12), (cap.x + 9, cap.y + 2), (cap.right - 10, cap.y + 2))  # a thin highlight along the top
+        pygame.draw.rect(surface, face, cap, border_radius=_s(10))  # the key top
+        pygame.draw.line(surface, _lighten(face, 0.12), (cap.x + _s(9), cap.y + _s(2)), (cap.right - _s(10), cap.y + _s(2)), _s(1))  # a thin highlight along the top
         edge = _lerp_colour(_lerp_colour(config.RECEPTOR_EDGE, tint, 0.45), _lighten(tint, 0.3), lit)  # outline blends to the lane colour
         edge = _lerp_colour(edge, config.MISS_COLOUR, miss)  # red on a miss
-        pygame.draw.rect(surface, edge, cap, width=2, border_radius=10)  # the outline
+        pygame.draw.rect(surface, edge, cap, width=_s(2), border_radius=_s(10))  # the outline
         label = _lerp_colour(_lerp_colour(config.TEXT_MUTED, tint, 0.5), (255, 255, 255), lit)  # the letter brightens when pressed
         text(surface, config.LANE_LABELS[lane], cap.center, size=17, colour=label, bold=True, align="middle")  # the key name
 
@@ -918,7 +963,7 @@ def draw_highway(surface: pygame.Surface) -> None:  # the strip, from cache
 def draw_highway_fades(surface: pygame.Surface) -> None:  # fades stamped over the notes
     road = highway_rect()  # same width as the strip
     surface.blit(_top_fade_sprite(), road.topleft)  # notes come out of the dark at the top
-    surface.blit(_bottom_fade_sprite(), (road.x, int(config.JUDGE_LINE_Y) + 20))  # and sink under the keys
+    surface.blit(_bottom_fade_sprite(), (road.x, int(config.JUDGE_LINE_Y) + _s(20)))  # and sink under the keys
 
 
 def draw_judgement_popup(  # PERFECT / GOOD / MISS word
@@ -936,15 +981,15 @@ def draw_judgement_popup(  # PERFECT / GOOD / MISS word
         return  # nothing to show
     fade = 1.0 - age_ms / 600.0  # fades over its life
     pop = 1.0 + 0.24 * max(0.0, 1.0 - age_ms / 150.0)  # opens big, settles
-    rise = 10.0 * min(1.0, age_ms / 180.0)  # drifts up a little
+    rise = _sf(10.0) * min(1.0, age_ms / 180.0)  # drifts up a little
     centre_x = config.WINDOW_WIDTH / 2.0  # centred
     colour = VERDICT_COLOURS[verdict]  # its colour
     alpha = int(255 * min(1.0, fade * 1.6))  # fade, but stay readable longer
     # anchored by its bottom edge, so the opening pop grows upwards and never
     # covers the error reading underneath
-    glow_text(surface, verdict.value, (centre_x, config.JUDGE_LINE_Y - 96 - rise), size=34, colour=colour, glow=colour, align="midbottom", scale=pop, alpha=alpha)  # the word
+    glow_text(surface, verdict.value, (centre_x, config.JUDGE_LINE_Y - _s(96) - rise), size=34, colour=colour, glow=colour, align="midbottom", scale=pop, alpha=alpha)  # the word
     if verdict is not Verdict.MISS:  # a miss has no tap, so no reading
-        text(surface, error_text, (centre_x, config.JUDGE_LINE_Y - 90), size=13, colour=config.TEXT_MUTED, mono=True, align="center", alpha=int(255 * fade))  # the ms reading
+        text(surface, error_text, (centre_x, config.JUDGE_LINE_Y - _s(90)), size=13, colour=config.TEXT_MUTED, mono=True, align="center", alpha=int(255 * fade))  # the ms reading
 
 
 def draw_countdown(surface: pygame.Surface, remaining_ms: float) -> None:  # the 3, 2, 1 before the first note
@@ -957,14 +1002,15 @@ def draw_countdown(surface: pygame.Surface, remaining_ms: float) -> None:  # the
     age_in_second = 1000.0 - (remaining_ms % 1000.0)  # how long this number has been up
     pop = 1.0 + 0.30 * max(0.0, 1.0 - age_in_second / 160.0)  # pops on arrival
     fade = min(1.0, remaining_ms / 350.0)  # fades near the end
-    centre = (int(config.WINDOW_WIDTH / 2), 262)  # over the highway
-    backdrop = pygame.Surface((180, 180), pygame.SRCALPHA)  # a dark disc so the number reads over notes
-    pygame.gfxdraw.filled_circle(backdrop, 90, 90, 66, (*config.BACKGROUND_BOTTOM, int(170 * fade)))  # the disc
+    centre = (int(config.WINDOW_WIDTH / 2), _s(262))  # over the highway
+    side = _s(180)  # the backdrop's box
+    backdrop = pygame.Surface((side, side), pygame.SRCALPHA)  # a dark disc so the number reads over notes
+    pygame.gfxdraw.filled_circle(backdrop, side // 2, side // 2, _s(66), (*config.BACKGROUND_BOTTOM, int(170 * fade)))  # the disc
     surface.blit(backdrop, backdrop.get_rect(center=centre))  # behind the ring
-    _thick_arc(surface, centre, 62, 1.0, _darken(config.LANE_EDGE, 1.0 - fade), 5)  # the empty track
-    _thick_arc(surface, centre, 62, 1.0 - age_in_second / 1000.0, _darken(config.HIT_FLASH, 1.0 - fade), 5)  # the part of the second that is left
-    glow_text(surface, str(number), (centre[0], centre[1] + 4), size=76, colour=config.TEXT, glow=config.HIT_FLASH, align="middle", scale=pop, alpha=int(255 * fade))  # the digit
-    tracked_text(surface, "GET READY", (centre[0], centre[1] - 104), size=13, colour=config.HIT_FLASH, tracking=6, align="center")  # the label above
+    _thick_arc(surface, centre, _s(62), 1.0, _darken(config.LANE_EDGE, 1.0 - fade), _s(5))  # the empty track
+    _thick_arc(surface, centre, _s(62), 1.0 - age_in_second / 1000.0, _darken(config.HIT_FLASH, 1.0 - fade), _s(5))  # the part of the second that is left
+    glow_text(surface, str(number), (centre[0], centre[1] + _s(4)), size=76, colour=config.TEXT, glow=config.HIT_FLASH, align="middle", scale=pop, alpha=int(255 * fade))  # the digit
+    tracked_text(surface, "GET READY", (centre[0], centre[1] - _s(104)), size=13, colour=config.HIT_FLASH, tracking=6, align="center")  # the label above
 
 
 def draw_go(surface: pygame.Surface, remaining_ms: float) -> None:  # GO, as the first note lands
@@ -974,9 +1020,9 @@ def draw_go(surface: pygame.Surface, remaining_ms: float) -> None:  # GO, as the
     age = 800.0 - remaining_ms  # 0 to 800 ms
     fade = min(1.0, remaining_ms / 320.0)  # fades out through its life
     pop = 1.0 + 0.20 * max(0.0, 1.0 - age / 160.0)  # same pop idea
-    centre = (int(config.WINDOW_WIDTH / 2), 262)  # same spot as the numbers
-    _soft_ring(surface, centre, 62 + int(70 * min(1.0, age / 500.0)), config.PERFECT_COLOUR, 3, int(200 * fade))  # a ring that opens outwards
-    glow_text(surface, "GO!", (centre[0], centre[1] + 4), size=84, colour=config.PERFECT_COLOUR, glow=config.PERFECT_COLOUR, align="middle", scale=pop, alpha=int(255 * fade))  # the word
+    centre = (int(config.WINDOW_WIDTH / 2), _s(262))  # same spot as the numbers
+    _soft_ring(surface, centre, _s(62) + int(_sf(70) * min(1.0, age / 500.0)), config.PERFECT_COLOUR, _s(3), int(200 * fade))  # a ring that opens outwards
+    glow_text(surface, "GO!", (centre[0], centre[1] + _s(4)), size=84, colour=config.PERFECT_COLOUR, glow=config.PERFECT_COLOUR, align="middle", scale=pop, alpha=int(255 * fade))  # the word
 
 
 def _ms(value: float) -> str:  # -0.4 -> "+0 ms", never "-0 ms"
@@ -1008,48 +1054,48 @@ def draw_play_hud(  # the two side columns
     top of the lanes; the fps now lives in the TAB panel only.
     """
     score = session.score  # the totals
-    column = highway_rect().x - 24 - 24  # room between the window edge and the highway
-    left, right = 24, config.WINDOW_WIDTH - 24  # the two margins
+    column = highway_rect().x - _s(24) - _s(24)  # room between the window edge and the highway
+    left, right = _s(24), config.WINDOW_WIDTH - _s(24)  # the two margins
 
     # --- left: what is playing, and how far through it we are
-    tracked_text(surface, "NOW PLAYING", (left, 26), size=11, tracking=3)  # the label
-    y = 44  # pen
+    tracked_text(surface, "NOW PLAYING", (left, _s(26)), size=11, tracking=3)  # the label
+    y = _s(44)  # pen
     for line in wrap_text(chart_title, column, 16, bold=True):  # the title, wrapped to the column
         text(surface, line, (left, y), size=16, colour=config.TEXT, bold=True)  # one line
-        y += 21  # next line
-    text(surface, f"{session.chart.bpm:.0f} BPM  ·  {score.note_count} NOTES", (left, y + 4), size=12, colour=config.TEXT_MUTED, bold=True)  # the meta line
+        y += _s(21)  # next line
+    text(surface, f"{session.chart.bpm:.0f} BPM  ·  {score.note_count} NOTES", (left, y + _s(4)), size=12, colour=config.TEXT_MUTED, bold=True)  # the meta line
 
     length = max(1.0, float(session.chart.length_ms) + 1200.0)  # the run ends 1.2 s after the last note
     fraction = min(1.0, max(0.0, song_ms / length))  # 0..1 through the song
-    bar = pygame.Rect(left, y + 40, column, 5)  # the progress bar
-    pygame.draw.rect(surface, config.LANE_EDGE, bar, border_radius=3)  # the track
+    bar = pygame.Rect(left, y + _s(40), column, _s(5))  # the progress bar
+    pygame.draw.rect(surface, config.LANE_EDGE, bar, border_radius=_s(3))  # the track
     if fraction > 0.0:  # something has played
         filled = bar.copy()  # the played part
-        filled.width = max(5, int(bar.width * fraction))  # grows with the song
-        pygame.draw.rect(surface, config.HIT_FLASH, filled, border_radius=3)  # the fill
-        pygame.gfxdraw.filled_circle(surface, filled.right - 2, bar.centery, 4, _lighten(config.HIT_FLASH, 0.4))  # the playhead
-    text(surface, _clock_text(song_ms), (left, bar.bottom + 8), size=13, colour=config.TEXT, mono=True)  # elapsed
-    text(surface, _clock_text(length), (bar.right, bar.bottom + 8), size=13, colour=config.TEXT_MUTED, mono=True, align="right")  # total
+        filled.width = max(_s(5), int(bar.width * fraction))  # grows with the song
+        pygame.draw.rect(surface, config.HIT_FLASH, filled, border_radius=_s(3))  # the fill
+        pygame.gfxdraw.filled_circle(surface, filled.right - _s(2), bar.centery, _s(4), _lighten(config.HIT_FLASH, 0.4))  # the playhead
+    text(surface, _clock_text(song_ms), (left, bar.bottom + _s(8)), size=13, colour=config.TEXT, mono=True)  # elapsed
+    text(surface, _clock_text(length), (bar.right, bar.bottom + _s(8)), size=13, colour=config.TEXT_MUTED, mono=True, align="right")  # total
 
     if show_hints:  # the two keys that matter mid-run
-        keycap(surface, "TAB", (left, config.WINDOW_HEIGHT - 88), size=11)  # debug key
-        text(surface, "timing overlay", (left + 52, config.WINDOW_HEIGHT - 83), size=12, colour=config.TEXT_MUTED, bold=True)  # what it does
-        keycap(surface, "ESC", (left, config.WINDOW_HEIGHT - 52), size=11)  # quit key
-        text(surface, "end the run", (left + 52, config.WINDOW_HEIGHT - 47), size=12, colour=config.TEXT_MUTED, bold=True)  # what it does
+        keycap(surface, "TAB", (left, config.WINDOW_HEIGHT - _s(88)), size=11)  # debug key
+        text(surface, "timing overlay", (left + _s(52), config.WINDOW_HEIGHT - _s(83)), size=12, colour=config.TEXT_MUTED, bold=True)  # what it does
+        keycap(surface, "ESC", (left, config.WINDOW_HEIGHT - _s(52)), size=11)  # quit key
+        text(surface, "end the run", (left + _s(52), config.WINDOW_HEIGHT - _s(47)), size=12, colour=config.TEXT_MUTED, bold=True)  # what it does
 
     # --- right: score, accuracy, and the three counts
-    tracked_text(surface, "SCORE", (right, 26), size=11, tracking=3, align="right")  # the label
-    glow_text(surface, f"{score.points:,}", (right + 6, 36), size=34, colour=config.TEXT, glow=config.JUDGE_LINE, align="right")  # the number, with thousands commas
-    tracked_text(surface, "ACCURACY", (right, 100), size=11, tracking=3, align="right")  # the label
+    tracked_text(surface, "SCORE", (right, _s(26)), size=11, tracking=3, align="right")  # the label
+    glow_text(surface, f"{score.points:,}", (right + _s(6), _s(36)), size=34, colour=config.TEXT, glow=config.JUDGE_LINE, align="right")  # the number, with thousands commas
+    tracked_text(surface, "ACCURACY", (right, _s(100)), size=11, tracking=3, align="right")  # the label
     accuracy = _live_accuracy(session)  # None before the first judged note
-    text(surface, "--" if accuracy is None else f"{accuracy:.1f}%", (right, 116), size=22, colour=config.TEXT, bold=True, align="right")  # the value
+    text(surface, "--" if accuracy is None else f"{accuracy:.1f}%", (right, _s(116)), size=22, colour=config.TEXT, bold=True, align="right")  # the value
     rows = (("PERFECT", score.perfect, config.PERFECT_COLOUR), ("GOOD", score.good, config.GOOD_COLOUR), ("MISS", score.miss, config.MISS_COLOUR))  # the counts
     for row, (label, value, colour) in enumerate(rows):  # one row each
-        row_y = 166 + row * 24  # spaced rows
-        pygame.gfxdraw.filled_circle(surface, right - column + 4, row_y + 8, 4, colour)  # a coloured dot
-        text(surface, label, (right - column + 16, row_y), size=13, colour=config.TEXT_MUTED, bold=True)  # the word
+        row_y = _s(166 + row * 24)  # spaced rows
+        pygame.gfxdraw.filled_circle(surface, right - column + _s(4), row_y + _s(8), _s(4), colour)  # a coloured dot
+        text(surface, label, (right - column + _s(16), row_y), size=13, colour=config.TEXT_MUTED, bold=True)  # the word
         text(surface, str(value), (right, row_y), size=13, colour=colour, bold=True, mono=True, align="right")  # the count
-    text(surface, f"{score.judged} / {score.note_count} judged", (right, 246), size=12, colour=config.TEXT_DIM, mono=True, align="right")  # progress through the chart
+    text(surface, f"{score.judged} / {score.note_count} judged", (right, _s(246)), size=12, colour=config.TEXT_DIM, mono=True, align="right")  # progress through the chart
 
 
 def draw_debug_panel(  # the two clocks side by side
@@ -1076,45 +1122,46 @@ def draw_debug_panel(  # the two clocks side by side
         ("offset", f"{latency_offset_ms:+.0f} ms"),  # what calibration decided
         ("fps", "-" if fps is None else f"{fps:.1f}"),  # a dash when headless
     ]  # rows done
-    width = highway_rect().x - 24 - 16  # fits the left column
-    rect = pygame.Rect(24, config.WINDOW_HEIGHT - 40 - 20 * len(rows) - 24, width, 40 + 20 * len(rows))  # bottom left
-    panel(surface, rect, alpha=235, radius=10, edge=config.JUDGE_LINE)  # a blue edge marks it as a dev tool
-    tracked_text(surface, "DEBUG", (rect.x + 12, rect.y + 10), size=11, colour=config.HIT_FLASH, tracking=3)  # the title
-    text(surface, "TAB", (rect.right - 12, rect.y + 10), size=11, colour=config.TEXT_DIM, bold=True, align="right")  # how to hide it
+    width = highway_rect().x - _s(24) - _s(16)  # fits the left column
+    rect = pygame.Rect(_s(24), config.WINDOW_HEIGHT - _s(40 + 20 * len(rows) + 24), width, _s(40 + 20 * len(rows)))  # bottom left
+    panel(surface, rect, alpha=235, radius=_s(10), edge=config.JUDGE_LINE)  # a blue edge marks it as a dev tool
+    tracked_text(surface, "DEBUG", (rect.x + _s(12), rect.y + _s(10)), size=11, colour=config.HIT_FLASH, tracking=3)  # the title
+    text(surface, "TAB", (rect.right - _s(12), rect.y + _s(10)), size=11, colour=config.TEXT_DIM, bold=True, align="right")  # how to hide it
     for row, (label, value) in enumerate(rows):  # each row
-        y = rect.y + 32 + row * 20  # row position
-        text(surface, label, (rect.x + 12, y), size=12, colour=config.TEXT_MUTED, mono=True)  # left
-        text(surface, value, (rect.right - 12, y), size=12, colour=config.TEXT, mono=True, align="right")  # right
+        y = rect.y + _s(32 + row * 20)  # row position
+        text(surface, label, (rect.x + _s(12), y), size=12, colour=config.TEXT_MUTED, mono=True)  # left
+        text(surface, value, (rect.right - _s(12), y), size=12, colour=config.TEXT, mono=True, align="right")  # right
 
 
 # --- other screens ----------------------------------------------------------
 def _draw_ambient_notes(surface: pygame.Surface, anim_ms: float) -> None:  # demo notes drifting behind the title
     """Demo notes drifting down the lanes behind the title content."""
-    span = config.WINDOW_HEIGHT + 120  # travel range, a little past both edges
+    span = config.WINDOW_HEIGHT + _s(120)  # travel range, a little past both edges
     for i in range(12):  # twelve drifting notes
         lane = i % config.LANE_COUNT  # spread across the lanes
-        y = (anim_ms * 0.085 + i * 157.0) % span - 60.0  # steady fall, staggered start
+        y = _sf(anim_ms * 0.085 + i * 157.0) % span - _sf(60.0)  # steady fall, staggered start
         sprite = _note_sprite(LANE_TINTS[lane])  # cached image
         sprite.set_alpha(30)  # very faint
         surface.blit(sprite, sprite.get_rect(center=(int(lane_centre_x(lane)), int(y))))  # in its lane
-        sprite.set_alpha(None)  # the cache goes back to opaque
+        sprite.set_alpha(255)  # the cache goes back to full strength, see text()
 
 
 def _draw_equaliser(surface: pygame.Surface, centre_x: float, y: int, anim_ms: Optional[float]) -> None:  # bars under the logo
-    count, bar_w, gap = 33, 6, 4  # thirty-three thin bars
+    count, bar_w, gap = 33, _s(6), _s(4)  # thirty-three thin bars
     left = centre_x - (count * bar_w + (count - 1) * gap) / 2.0  # centred row
     for index in range(count):  # each bar
         phase = (anim_ms or 0.0) / 260.0  # zero in captures, so the frame is fixed
         level = 0.5 + 0.5 * math.sin(index * 0.55 + phase) * math.cos(index * 0.23 - phase * 0.6)  # a slow wave
-        height = 3 + int(15 * level)  # 3 to 18 px
+        height = _s(3) + int(_sf(15) * level)  # 3 to 18 design px
         colour = _gradient_at(LOGO_GRADIENT, index / (count - 1))  # same ramp as the logo
         bar = pygame.Rect(int(left + index * (bar_w + gap)), y - height, bar_w, height)  # grows upwards from y
-        pygame.draw.rect(surface, _darken(colour, 0.35), bar, border_radius=2)  # muted, it is decoration
+        pygame.draw.rect(surface, _darken(colour, 0.35), bar, border_radius=_s(2))  # muted, it is decoration
 
 
 def _draw_arrow(surface: pygame.Surface, centre: tuple[int, int], direction: int, colour: Colour) -> None:  # a chart picker arrow
     x, y = centre  # unpack
-    points = [(x - 7 * direction, y - 11), (x + 7 * direction, y), (x - 7 * direction, y + 11)]  # a triangle pointing left or right
+    half_w, half_h = _s(7), _s(11)  # the triangle's half sizes
+    points = [(x - half_w * direction, y - half_h), (x + half_w * direction, y), (x - half_w * direction, y + half_h)]  # a triangle pointing left or right
     pygame.gfxdraw.aapolygon(surface, points, colour)  # smooth edge
     pygame.gfxdraw.filled_polygon(surface, points, colour)  # filled
 
@@ -1148,57 +1195,57 @@ def draw_title(  # the waiting screen
         _draw_ambient_notes(surface, anim_ms)  # the drifting notes
     centre_x = config.WINDOW_WIDTH / 2.0  # used a lot here
 
-    _draw_equaliser(surface, centre_x, 70, anim_ms)  # decoration above the logo
-    gradient_text(surface, "BEATLANES", (centre_x, 128), size=76, align="middle")  # the logo
-    tracked_text(surface, "FOUR LANE KEYBOARD RHYTHM PROTOTYPE", (centre_x, 176), size=12, colour=config.TEXT_MUTED, tracking=5, align="center")  # the tagline
+    _draw_equaliser(surface, centre_x, _s(70), anim_ms)  # decoration above the logo
+    gradient_text(surface, "BEATLANES", (centre_x, _s(128)), size=76, align="middle")  # the logo
+    tracked_text(surface, "FOUR LANE KEYBOARD RHYTHM PROTOTYPE", (centre_x, _s(176)), size=12, colour=config.TEXT_MUTED, tracking=5, align="center")  # the tagline
 
-    card = pygame.Rect(int(centre_x) - 300, 214, 600, 166)  # the chart card
+    card = pygame.Rect(int(centre_x) - _s(300), _s(214), _s(600), _s(166))  # the chart card
     panel(surface, card, alpha=232)  # translucent, so the notes show
     picker = chart_picker is not None and chart_picker[0]  # more than one chart installed
     label = f"CHART {chart_picker[1] + 1} / {chart_picker[2]}" if picker else "CHART"  # which one of how many
-    tracked_text(surface, label, (card.x + 28, card.y + 22), size=11, colour=config.HIT_FLASH, tracking=3)  # top left
-    shown, title_size = fit_text(chart_title, card.width - 56 - 150, 24, 15, bold=True)  # the title, fitted to the space left of the best score
-    text(surface, shown, (card.x + 28, card.y + 42), size=title_size, colour=config.TEXT, bold=True)  # the chart name
+    tracked_text(surface, label, (card.x + _s(28), card.y + _s(22)), size=11, colour=config.HIT_FLASH, tracking=3)  # top left
+    shown, title_size = fit_text(chart_title, card.width - _s(56) - _s(150), 24, 15, bold=True)  # the title, fitted to the space left of the best score
+    text(surface, shown, (card.x + _s(28), card.y + _s(42)), size=title_size, colour=config.TEXT, bold=True)  # the chart name
     meta = f"{chart_bpm:.0f} BPM   ·   {note_count} NOTES   ·   {_clock_text(chart_length_ms + 1200.0)}"  # tempo, size, length
-    text(surface, meta, (card.x + 28, card.y + 78), size=13, colour=config.TEXT_MUTED, bold=True)  # under the title
+    text(surface, meta, (card.x + _s(28), card.y + _s(78)), size=13, colour=config.TEXT_MUTED, bold=True)  # under the title
 
     if lane_counts:  # notes per lane, so two charts can be told apart at a glance
         most = max(1, max(lane_counts))  # the busiest lane sets the scale
         for lane, count in enumerate(lane_counts):  # one block per lane
-            x = card.x + 28 + lane * 132  # four columns
-            cap = keycap(surface, config.LANE_LABELS[lane], (x, card.y + 112), size=11, tint=LANE_TINTS[lane])  # the key
-            track = pygame.Rect(cap.right + 8, cap.centery - 2, 64, 4)  # the bar's track
-            pygame.draw.rect(surface, config.LANE_EDGE, track, border_radius=2)  # background
-            pygame.draw.rect(surface, LANE_TINTS[lane], pygame.Rect(track.x, track.y, max(4, int(64 * count / most)), 4), border_radius=2)  # share of the notes
-            text(surface, str(count), (track.right + 6, cap.centery - 8), size=12, colour=config.TEXT_MUTED, mono=True)  # the number
+            x = card.x + _s(28 + lane * 132)  # four columns
+            cap = keycap(surface, config.LANE_LABELS[lane], (x, card.y + _s(112)), size=11, tint=LANE_TINTS[lane])  # the key
+            track = pygame.Rect(cap.right + _s(8), cap.centery - _s(2), _s(64), _s(4))  # the bar's track
+            pygame.draw.rect(surface, config.LANE_EDGE, track, border_radius=_s(2))  # background
+            pygame.draw.rect(surface, LANE_TINTS[lane], pygame.Rect(track.x, track.y, max(_s(4), int(track.width * count / most)), track.height), border_radius=_s(2))  # share of the notes
+            text(surface, str(count), (track.right + _s(6), cap.centery - _s(8)), size=12, colour=config.TEXT_MUTED, mono=True)  # the number
 
-    tracked_text(surface, "BEST", (card.right - 28, card.y + 22), size=11, tracking=3, align="right")  # top right
+    tracked_text(surface, "BEST", (card.right - _s(28), card.y + _s(22)), size=11, tracking=3, align="right")  # top right
     best_text = "--" if best_accuracy is None else f"{best_accuracy:.1f}%"  # nothing until a run
-    text(surface, best_text, (card.right - 28, card.y + 38), size=26, colour=config.HIT_FLASH if best_accuracy is not None else config.TEXT_DIM, bold=True, align="right")  # the best score
+    text(surface, best_text, (card.right - _s(28), card.y + _s(38)), size=26, colour=config.HIT_FLASH if best_accuracy is not None else config.TEXT_DIM, bold=True, align="right")  # the best score
     if last_accuracy is not None:  # only after a run
-        text(surface, f"last {last_accuracy:.1f}%", (card.right - 28, card.y + 76), size=12, colour=config.TEXT_MUTED, mono=True, align="right")  # the last run
+        text(surface, f"last {last_accuracy:.1f}%", (card.right - _s(28), card.y + _s(76)), size=12, colour=config.TEXT_MUTED, mono=True, align="right")  # the last run
 
     if picker:  # arrows either side of the card
-        bob = 0 if anim_ms is None else int(3 * math.sin(anim_ms / 300.0))  # a small nudge outwards and back
-        _draw_arrow(surface, (card.x - 30 - bob, card.centery), -1, config.HIT_FLASH)  # left
-        _draw_arrow(surface, (card.right + 30 + bob, card.centery), 1, config.HIT_FLASH)  # right
+        bob = 0 if anim_ms is None else int(_sf(3) * math.sin(anim_ms / 300.0))  # a small nudge outwards and back
+        _draw_arrow(surface, (card.x - _s(30) - bob, card.centery), -1, config.HIT_FLASH)  # left
+        _draw_arrow(surface, (card.right + _s(30) + bob, card.centery), 1, config.HIT_FLASH)  # right
 
     chips = (  # the timing rules, at a glance
         (f"PERFECT ±{config.PERFECT_MS:.0f} ms", config.PERFECT_COLOUR),  # tight window
         (f"GOOD ±{config.GOOD_MS:.0f} ms", config.GOOD_COLOUR),  # loose window
         (f"OFFSET {calibration_ms:+.0f} ms", config.HIT_FLASH),  # the saved calibration
     )  # three chips
-    widths = [text_width(message, 12, bold=True) + 22 for message, _ in chips]  # measured first so the row centres
-    x = centre_x - (sum(widths) + 12 * (len(chips) - 1)) / 2.0  # start of the row
+    widths = [text_width(message, 12, bold=True) + _s(22) for message, _ in chips]  # measured first so the row centres, same padding as chip()
+    x = centre_x - (sum(widths) + _s(12) * (len(chips) - 1)) / 2.0  # start of the row
     for (message, colour), width in zip(chips, widths):  # draw them
-        chip(surface, message, (x + width / 2.0, 408), colour)  # one pill
-        x += width + 12  # next one
+        chip(surface, message, (x + width / 2.0, _s(408)), colour)  # one pill
+        x += width + _s(12)  # next one
 
     if status_message:  # e.g. 'calibration saved' or 'no audio device'
-        text(surface, status_message, (centre_x, 438), size=13, colour=config.TEXT_MUTED, mono=True, align="center")  # its own row now
+        text(surface, status_message, (centre_x, _s(438)), size=13, colour=config.TEXT_MUTED, mono=True, align="center")  # its own row now
 
     pulse = 255 if anim_ms is None else int(190 + 65 * math.sin(anim_ms / 380.0))  # the start hint breathes
-    hint_row(surface, ((("SPACE",), "START"), (("C",), "CALIBRATE"), (("ESC",), "QUIT")), centre_x, 486, size=13, alpha=pulse)  # the main keys
+    hint_row(surface, ((("SPACE",), "START"), (("C",), "CALIBRATE"), (("ESC",), "QUIT")), centre_x, _s(486), size=13, alpha=pulse)  # the main keys
     extra = [(("TAB",), "timing overlay in play")]  # always true
     if picker:  # only worth saying when there is a choice
         extra.insert(0, (("LEFT", "RIGHT"), "change chart"))  # arrows first
@@ -1206,20 +1253,21 @@ def draw_title(  # the waiting screen
     # on the drifting notes and the key beams - on a real screen the words
     # vanished. now 12px on a darker cap with a strip of highway behind the
     # whole row, so the letters always have a quiet background to sit on
-    row_sizes = [text_width(action, 13, bold=True) + sum(_keycap_width(key, 12) for key in keys) + 4 * (len(keys) - 1) + 9 for keys, action in extra]  # measure before the strip
-    strip = pygame.Rect(int(centre_x - (sum(row_sizes) + 34 * (len(extra) - 1)) / 2.0) - 16, 544, int(sum(row_sizes) + 34 * (len(extra) - 1)) + 32, 38)  # behind the caps and words
-    panel(surface, strip, alpha=205, radius=10)  # the quiet strip
-    hint_row(surface, extra, centre_x, 549, size=12, dim=True)  # the redesigned second row
+    row_sizes = [text_width(action, 13, bold=True) + sum(_keycap_width(key, 12) for key in keys) + _s(4) * (len(keys) - 1) + _s(9) for keys, action in extra]  # measure before the strip, same gaps as hint_row
+    row_width = sum(row_sizes) + _s(34) * (len(extra) - 1)  # the whole row
+    strip = pygame.Rect(int(centre_x - row_width / 2.0) - _s(16), _s(544), int(row_width) + _s(32), _s(38))  # behind the caps and words
+    panel(surface, strip, alpha=205, radius=_s(10))  # the quiet strip
+    hint_row(surface, extra, centre_x, _s(549), size=12, dim=True)  # the redesigned second row
     # the week 11 reminder from class, in the professor's words: the point of
     # the prototype is to learn, not to ship a commercial product
-    text(surface, '"BUILDING TO LEARN"', (centre_x, 606), size=11, colour=config.TEXT_MUTED, bold=True, align="center")  # the phrase itself
-    text(surface, "the prototype is for learning, not for shipping", (centre_x, 624), size=10, colour=config.TEXT_DIM, align="center")  # what it means
-    text(surface, f"v{__version__}  ·  week 11 build", (config.WINDOW_WIDTH - 16, config.WINDOW_HEIGHT - 24), size=11, colour=config.TEXT_DIM, align="right")  # build tag, bottom right
+    text(surface, '"BUILDING TO LEARN"', (centre_x, _s(606)), size=11, colour=config.TEXT_MUTED, bold=True, align="center")  # the phrase itself
+    text(surface, "the prototype is for learning, not for shipping", (centre_x, _s(624)), size=10, colour=config.TEXT_DIM, align="center")  # what it means
+    text(surface, f"v{__version__}  ·  week 11 build", (config.WINDOW_WIDTH - _s(16), config.WINDOW_HEIGHT - _s(24)), size=11, colour=config.TEXT_DIM, align="right")  # build tag, bottom right
 
 
 def _stat_block(surface: pygame.Surface, label: str, value: str, centre_x: float, y: int, colour: Colour = config.TEXT) -> None:  # a small label over a number
     tracked_text(surface, label, (centre_x, y), size=10, tracking=2, align="center")  # the label
-    text(surface, value, (centre_x, y + 15), size=20, colour=colour, bold=True, align="center")  # the value
+    text(surface, value, (centre_x, y + _s(15)), size=20, colour=colour, bold=True, align="center")  # the value
 
 
 def _timing_axis(  # an early/late axis with the windows shaded, shared by calibration and results
@@ -1235,17 +1283,17 @@ def _timing_axis(  # an early/late axis with the windows shaded, shared by calib
         return int(rect.centerx + max(-reach_ms, min(reach_ms, ms)) * scale)  # clamped so wild taps sit on the ends
 
     good = pygame.Rect(x_for(-config.GOOD_MS), rect.y, x_for(config.GOOD_MS) - x_for(-config.GOOD_MS), rect.height)  # the GOOD window
-    pygame.draw.rect(surface, _darken(config.GOOD_COLOUR, 0.88), good, border_radius=4)  # faint amber
+    pygame.draw.rect(surface, _darken(config.GOOD_COLOUR, 0.88), good, border_radius=_s(4))  # faint amber
     perfect = pygame.Rect(x_for(-config.PERFECT_MS), rect.y, x_for(config.PERFECT_MS) - x_for(-config.PERFECT_MS), rect.height)  # the PERFECT window
-    pygame.draw.rect(surface, _darken(config.PERFECT_COLOUR, 0.82), perfect, border_radius=4)  # faint green
-    pygame.draw.line(surface, config.LANE_EDGE, (rect.x, mid_y), (rect.right, mid_y), 1)  # the axis
-    pygame.draw.line(surface, config.TEXT_MUTED, (rect.centerx, rect.y - 3), (rect.centerx, rect.bottom + 3), 1)  # zero
+    pygame.draw.rect(surface, _darken(config.PERFECT_COLOUR, 0.82), perfect, border_radius=_s(4))  # faint green
+    pygame.draw.line(surface, config.LANE_EDGE, (rect.x, mid_y), (rect.right, mid_y), _s(1))  # the axis
+    pygame.draw.line(surface, config.TEXT_MUTED, (rect.centerx, rect.y - _s(3)), (rect.centerx, rect.bottom + _s(3)), _s(1))  # zero
     for value in errors:  # one mark per tap
         colour = config.PERFECT_COLOUR if abs(value) <= config.PERFECT_MS else config.GOOD_COLOUR if abs(value) <= config.GOOD_MS else config.MISS_COLOUR  # by window
-        pygame.draw.line(surface, colour, (x_for(value), rect.y + 3), (x_for(value), rect.bottom - 3), 2)  # a tick
-    text(surface, "EARLY", (rect.x, rect.bottom + 6), size=10, colour=config.TEXT_DIM, bold=True)  # left end
-    text(surface, "LATE", (rect.right, rect.bottom + 6), size=10, colour=config.TEXT_DIM, bold=True, align="right")  # right end
-    text(surface, "0", (rect.centerx, rect.bottom + 6), size=10, colour=config.TEXT_DIM, bold=True, align="center")  # the middle
+        pygame.draw.line(surface, colour, (x_for(value), rect.y + _s(3)), (x_for(value), rect.bottom - _s(3)), _s(2))  # a tick
+    text(surface, "EARLY", (rect.x, rect.bottom + _s(6)), size=10, colour=config.TEXT_DIM, bold=True)  # left end
+    text(surface, "LATE", (rect.right, rect.bottom + _s(6)), size=10, colour=config.TEXT_DIM, bold=True, align="right")  # right end
+    text(surface, "0", (rect.centerx, rect.bottom + _s(6)), size=10, colour=config.TEXT_DIM, bold=True, align="center")  # the middle
 
 
 def draw_calibration(  # the metronome screen
@@ -1264,37 +1312,37 @@ def draw_calibration(  # the metronome screen
     """
     draw_background(surface)  # the gradient
     centre_x = config.WINDOW_WIDTH / 2.0  # used a lot
-    gradient_text(surface, "CALIBRATION", (centre_x, 66), size=40, align="middle")  # the heading
-    text(surface, "Tap any lane key on every click. The median of your taps is saved as the offset.", (centre_x, 100), size=14, colour=config.TEXT_MUTED, align="center")  # the instruction
+    gradient_text(surface, "CALIBRATION", (centre_x, _s(66)), size=40, align="middle")  # the heading
+    text(surface, "Tap any lane key on every click. The median of your taps is saved as the offset.", (centre_x, _s(100)), size=14, colour=config.TEXT_MUTED, align="center")  # the instruction
 
-    centre = (int(centre_x), 250)  # the metronome
+    centre = (int(centre_x), _s(250))  # the metronome
     pulse = 1.0 - beat_phase  # 1 at the click, 0 at the next
-    pygame.gfxdraw.filled_circle(surface, centre[0], centre[1], 80, config.RECEPTOR_FILL)  # the dark disc
-    _soft_ring(surface, centre, 80, config.LANE_EDGE, 2, 255)  # its rim
-    _soft_ring(surface, centre, 80 + int(22 * pulse), config.HIT_FLASH, 3, int(40 + 180 * pulse))  # snaps wide on the click and closes in
+    pygame.gfxdraw.filled_circle(surface, centre[0], centre[1], _s(80), config.RECEPTOR_FILL)  # the dark disc
+    _soft_ring(surface, centre, _s(80), config.LANE_EDGE, _s(2), 255)  # its rim
+    _soft_ring(surface, centre, _s(80) + int(_sf(22) * pulse), config.HIT_FLASH, _s(3), int(40 + 180 * pulse))  # snaps wide on the click and closes in
     for beat in range(total_beats):  # one dot per click
         angle = -math.pi / 2 + 2 * math.pi * beat / max(1, total_beats)  # clockwise from the top
-        x = int(centre[0] + math.cos(angle) * 112)  # on a ring outside the disc
-        y = int(centre[1] + math.sin(angle) * 112)  # same
+        x = int(centre[0] + math.cos(angle) * _s(112))  # on a ring outside the disc
+        y = int(centre[1] + math.sin(angle) * _s(112))  # same
         if beat < beat_index:  # already played
-            pygame.gfxdraw.filled_circle(surface, x, y, 4, config.HIT_FLASH)  # lit
+            pygame.gfxdraw.filled_circle(surface, x, y, _s(4), config.HIT_FLASH)  # lit
         elif beat == beat_index:  # the current click
-            pygame.gfxdraw.filled_circle(surface, x, y, 5 + int(2 * pulse), _lighten(config.HIT_FLASH, 0.5))  # bigger, pulsing
+            pygame.gfxdraw.filled_circle(surface, x, y, _s(5) + int(_sf(2) * pulse), _lighten(config.HIT_FLASH, 0.5))  # bigger, pulsing
         else:  # still to come
-            pygame.gfxdraw.aacircle(surface, x, y, 4, config.LANE_EDGE)  # an empty ring
-    text(surface, str(min(beat_index + 1, total_beats)), (centre[0], centre[1] - 8), size=44, colour=config.TEXT, bold=True, align="middle")  # the click number
-    text(surface, f"of {total_beats}", (centre[0], centre[1] + 26), size=13, colour=config.TEXT_MUTED, bold=True, align="middle")  # out of how many
+            pygame.gfxdraw.aacircle(surface, x, y, _s(4), config.LANE_EDGE)  # an empty ring
+    text(surface, str(min(beat_index + 1, total_beats)), (centre[0], centre[1] - _s(8)), size=44, colour=config.TEXT, bold=True, align="middle")  # the click number
+    text(surface, f"of {total_beats}", (centre[0], centre[1] + _s(26)), size=13, colour=config.TEXT_MUTED, bold=True, align="middle")  # out of how many
 
     collected = list(offsets)  # the taps so far
-    axis = pygame.Rect(int(centre_x) - 220, 396, 440, 22)  # the tap strip
+    axis = pygame.Rect(int(centre_x) - _s(220), _s(396), _s(440), _s(22))  # the tap strip
     _timing_axis(surface, axis, collected, config.CALIBRATION_TOLERANCE_MS)  # one tick per tap, the windows shaded
 
     median = statistics.median(collected) if collected else None  # the number that will be saved
-    _stat_block(surface, "TAPS", str(len(collected)), centre_x - 150, 452)  # left
-    _stat_block(surface, "MEDIAN", "--" if median is None else _ms(median), centre_x, 452, config.HIT_FLASH)  # middle, the one that matters
-    _stat_block(surface, "LAST TAP", "--" if current_offset_ms is None else _ms(current_offset_ms), centre_x + 150, 452)  # right
+    _stat_block(surface, "TAPS", str(len(collected)), centre_x - _s(150), _s(452))  # left
+    _stat_block(surface, "MEDIAN", "--" if median is None else _ms(median), centre_x, _s(452), config.HIT_FLASH)  # middle, the one that matters
+    _stat_block(surface, "LAST TAP", "--" if current_offset_ms is None else _ms(current_offset_ms), centre_x + _s(150), _s(452))  # right
 
-    hint_row(surface, ((config.LANE_LABELS, "tap"), (("ESC",), "cancel")), centre_x, 548, size=12)  # the keys
+    hint_row(surface, ((config.LANE_LABELS, "tap"), (("ESC",), "cancel")), centre_x, _s(548), size=12)  # the keys
 
 
 def draw_results(  # the results screen
@@ -1311,25 +1359,26 @@ def draw_results(  # the results screen
     score = session.score  # the run's totals
     rank_colour = RANK_COLOURS.get(score.rank, config.HIT_FLASH)  # colour for this rank
 
-    tracked_text(surface, "RUN COMPLETE", (centre_x, 26), size=12, colour=config.HIT_FLASH, tracking=6, align="center")  # the label
-    shown, size = fit_text(chart_title, 700, 22, 15, bold=True)  # the chart name, fitted
-    text(surface, shown, (centre_x, 46), size=size, colour=config.TEXT, bold=True, align="center")  # under it
+    tracked_text(surface, "RUN COMPLETE", (centre_x, _s(26)), size=12, colour=config.HIT_FLASH, tracking=6, align="center")  # the label
+    shown, size = fit_text(chart_title, _s(700), 22, 15, bold=True)  # the chart name, fitted
+    text(surface, shown, (centre_x, _s(46)), size=size, colour=config.TEXT, bold=True, align="center")  # under it
 
-    card = pygame.Rect(110, 92, 740, 352)  # the results card
+    card = pygame.Rect(_s(110), _s(92), _s(740), _s(352))  # the results card
     panel(surface, card, alpha=238)  # nearly solid
 
     # left: rank badge with an accuracy ring
-    badge = (card.x + 140, card.y + 128)  # badge centre
-    halo = pygame.Surface((220, 220), pygame.SRCALPHA)  # a soft glow behind it
+    badge = (card.x + _s(140), card.y + _s(128))  # badge centre
+    side = _s(220)  # the glow's box
+    halo = pygame.Surface((side, side), pygame.SRCALPHA)  # a soft glow behind it
     for step in range(6, 0, -1):  # widest first
-        pygame.gfxdraw.filled_circle(halo, 110, 110, 74 + step * 5, (*rank_colour, 6))  # stacked faint discs
+        pygame.gfxdraw.filled_circle(halo, side // 2, side // 2, _s(74 + step * 5), (*rank_colour, 6))  # stacked faint discs
     surface.blit(halo, halo.get_rect(center=badge))  # behind the badge
-    pygame.gfxdraw.filled_circle(surface, badge[0], badge[1], 76, config.RECEPTOR_FILL)  # the disc
-    _thick_arc(surface, badge, 76, 1.0, config.LANE_EDGE, 7)  # the empty track
-    _thick_arc(surface, badge, 76, score.accuracy / 100.0, rank_colour, 7)  # fills with accuracy
-    glow_text(surface, score.rank, (badge[0], badge[1] + 2), size=88, colour=rank_colour, glow=rank_colour, align="middle")  # the letter
-    text(surface, f"{score.accuracy:.1f}%", (badge[0], card.y + 222), size=30, colour=config.TEXT, bold=True, align="center")  # accuracy under the badge
-    text(surface, f"{score.points:,} / {score.max_points:,} pts", (badge[0], card.y + 260), size=13, colour=config.TEXT_MUTED, mono=True, align="center")  # points under that
+    pygame.gfxdraw.filled_circle(surface, badge[0], badge[1], _s(76), config.RECEPTOR_FILL)  # the disc
+    _thick_arc(surface, badge, _s(76), 1.0, config.LANE_EDGE, _s(7))  # the empty track
+    _thick_arc(surface, badge, _s(76), score.accuracy / 100.0, rank_colour, _s(7))  # fills with accuracy
+    glow_text(surface, score.rank, (badge[0], badge[1] + _s(2)), size=88, colour=rank_colour, glow=rank_colour, align="middle")  # the letter
+    text(surface, f"{score.accuracy:.1f}%", (badge[0], card.y + _s(222)), size=30, colour=config.TEXT, bold=True, align="center")  # accuracy under the badge
+    text(surface, f"{score.points:,} / {score.max_points:,} pts", (badge[0], card.y + _s(260)), size=13, colour=config.TEXT_MUTED, mono=True, align="center")  # points under that
 
     badges = []  # the little achievement pills
     if score.miss == 0 and score.judged == score.note_count and score.note_count > 0:  # nothing missed
@@ -1337,32 +1386,32 @@ def draw_results(  # the results screen
     if new_best:  # better than this session's earlier runs
         badges.append(("NEW BEST", config.HIT_FLASH))  # cyan
     for index, (message, colour) in enumerate(badges):  # stacked under the points
-        chip(surface, message, (badge[0], card.y + 298 + index * 28), colour, size=11, filled=True)  # one pill each
+        chip(surface, message, (badge[0], card.y + _s(298 + index * 28)), colour, size=11, filled=True)  # one pill each
 
-    pygame.draw.line(surface, config.LANE_EDGE, (card.x + 280, card.y + 26), (card.x + 280, card.bottom - 26), 1)  # divider
+    pygame.draw.line(surface, config.LANE_EDGE, (card.x + _s(280), card.y + _s(26)), (card.x + _s(280), card.bottom - _s(26)), _s(1))  # divider
 
     # right: the three counts with bars
-    left, right = card.x + 312, card.right - 32  # the right section's edges
+    left, right = card.x + _s(312), card.right - _s(32)  # the right section's edges
     rows = (("PERFECT", score.perfect, config.PERFECT_COLOUR), ("GOOD", score.good, config.GOOD_COLOUR), ("MISS", score.miss, config.MISS_COLOUR))  # the counts
     for row, (label, value, colour) in enumerate(rows):  # one row each
-        y = card.y + 26 + row * 50  # spaced rows
-        text(surface, label, (left, y + 4), size=15, colour=colour, bold=True)  # the word
+        y = card.y + _s(26 + row * 50)  # spaced rows
+        text(surface, label, (left, y + _s(4)), size=15, colour=colour, bold=True)  # the word
         text(surface, str(value), (right, y), size=22, colour=colour, bold=True, align="right")  # the count
-        track = pygame.Rect(left, y + 32, right - left, 4)  # the bar track
-        pygame.draw.rect(surface, config.LANE_EDGE, track, border_radius=2)  # background
+        track = pygame.Rect(left, y + _s(32), right - left, _s(4))  # the bar track
+        pygame.draw.rect(surface, config.LANE_EDGE, track, border_radius=_s(2))  # background
         if value > 0:  # something to fill
-            pygame.draw.rect(surface, colour, pygame.Rect(left, track.y, max(4, int(track.width * value / max(1, score.note_count))), 4), border_radius=2)  # share of the chart
+            pygame.draw.rect(surface, colour, pygame.Rect(left, track.y, max(_s(4), int(track.width * value / max(1, score.note_count))), track.height), border_radius=_s(2))  # share of the chart
 
     stats = (("MAX COMBO", str(score.best_combo)), ("EARLY", str(score.early_taps)), ("LATE", str(score.late_taps)), ("STRAY", str(score.stray_taps)))  # the habits
     step = (right - left) / len(stats)  # four equal columns
     for index, (label, value) in enumerate(stats):  # one block each
-        _stat_block(surface, label, value, left + step * (index + 0.5), card.y + 186)  # centred in its column
+        _stat_block(surface, label, value, left + step * (index + 0.5), card.y + _s(186))  # centred in its column
 
     errors = session.hit_errors  # tap - target for every hit
-    tracked_text(surface, "TIMING", (left, card.y + 256), size=10, tracking=2)  # the label
+    tracked_text(surface, "TIMING", (left, card.y + _s(256)), size=10, tracking=2)  # the label
     if errors:  # only with hits to describe
-        text(surface, f"mean {_ms(statistics.fmean(errors))}   median {_ms(statistics.median(errors))}", (right, card.y + 254), size=12, colour=config.TEXT_MUTED, mono=True, align="right")  # the two numbers the calibration story is about
-    _timing_axis(surface, pygame.Rect(left, card.y + 278, right - left, 22), errors, config.GOOD_MS + 20)  # one tick per hit
+        text(surface, f"mean {_ms(statistics.fmean(errors))}   median {_ms(statistics.median(errors))}", (right, card.y + _s(254)), size=12, colour=config.TEXT_MUTED, mono=True, align="right")  # the two numbers the calibration story is about
+    _timing_axis(surface, pygame.Rect(left, card.y + _s(278), right - left, _s(22)), errors, config.GOOD_MS + 20)  # one tick per hit
 
-    text(surface, f"tap log  {log_name}", (centre_x, card.bottom + 16), size=12, colour=config.TEXT_DIM, mono=True, align="center")  # which csv
-    hint_row(surface, ((("R",), "RETRY"), (("T",), "TITLE"), (("ESC",), "QUIT")), centre_x, 540, size=13)  # the keys
+    text(surface, f"tap log  {log_name}", (centre_x, card.bottom + _s(16)), size=12, colour=config.TEXT_DIM, mono=True, align="center")  # which csv
+    hint_row(surface, ((("R",), "RETRY"), (("T",), "TITLE"), (("ESC",), "QUIT")), centre_x, _s(540), size=13)  # the keys
