@@ -25,6 +25,7 @@ from .session import PlaySession  # one play-through
 from .songclock import SongClock  # the song clock
 
 STATE_TITLE = "title"  # waiting for the player
+STATE_GUIDE = "guide"  # the week 12 short guide
 STATE_CALIBRATE = "calibrate"  # the metronome test
 STATE_COUNTDOWN = "countdown"  # 3, 2, 1 before the first note
 STATE_PLAY = "play"  # the song is running
@@ -34,7 +35,7 @@ COUNTDOWN_WINDOW_MS = 3000.0  # the digits only cover the three seconds before t
 
 # Every key name the game reacts to. Anything else that arrives is checked
 # against the physical key positions below before it is ignored.
-COMMAND_KEYS = {"escape", "space", "tab", "left", "right", "c", "r", "t"}  # the non-lane keys
+COMMAND_KEYS = {"escape", "space", "tab", "left", "right", "c", "r", "t", "g"}  # the non-lane keys
 KNOWN_KEYS = COMMAND_KEYS | set(config.LANE_KEY_TO_INDEX)  # lanes too
 
 # Physical key positions (scancodes) for the letter keys. pygame.key.name()
@@ -47,6 +48,7 @@ SCANCODE_NAMES = {  # scancode -> the name the rest of the game uses
     pygame.KSCAN_J: "j",  # lane 2
     pygame.KSCAN_K: "k",  # lane 3
     pygame.KSCAN_C: "c",  # calibrate
+    pygame.KSCAN_G: "g",  # guide
     pygame.KSCAN_R: "r",  # retry
     pygame.KSCAN_T: "t",  # title
 }  # the letters only, named keys like escape never change with the layout
@@ -251,6 +253,8 @@ class BeatLanesApp:  # the whole game, wired together
             self._start_recording()  # before the first frame exists
         if self.automatic and self.screenshot_state == STATE_CALIBRATE:  # the calibrate capture wants the metronome
             self._start_calibration()  # go straight to the metronome  # the capture target is the metronome screen
+        elif self.automatic and self.screenshot_state == STATE_GUIDE:  # the guide capture wants the guide
+            self.state = STATE_GUIDE  # no set up, it is a static screen
         elif self.automatic and self.screenshot_state != STATE_TITLE:  # any other capture starts from play
             self._start_play()  # no player, so skip the title screen  # straight into the song
         try:  # the loop, with cleanup guaranteed
@@ -327,10 +331,16 @@ class BeatLanesApp:  # the whole game, wired together
                 self._start_play()  # space means go
             elif name == "c":  # calibration
                 self._start_calibration()  # c for calibrate
+            elif name == "g":  # the short guide
+                self.state = STATE_GUIDE  # a new screen, nothing to set up
             elif name == "left" or name == "right":  # pick a chart
                 step = -1 if name == "left" else 1  # left goes back, right goes forward
                 self.chart_index = (self.chart_index + step) % len(self.chart_paths)  # modulo wraps around the ends
                 self.chart = load_chart(self.chart_paths[self.chart_index])  # load the newly picked one
+
+        elif self.state == STATE_GUIDE:  # the short guide
+            if name in ("escape", "g"):  # either key goes back
+                self.state = STATE_TITLE  # back to waiting
 
         elif self.state == STATE_CALIBRATE:  # the metronome test
             if name == "escape":  # back out
@@ -525,6 +535,12 @@ class BeatLanesApp:  # the whole game, wired together
                 lane_counts=self.chart.lane_counts,  # the per-lane bars
                 status_message=self.status_message,  # e.g. 'no audio device', now drawn on its own row
             )  # title screen done
+
+        elif self.state == STATE_GUIDE:  # the short guide
+            render.draw_guide(  # one screen, six rows
+                surface,  # same frame
+                self.latency_offset,  # the saved offset, shown in the calibration row
+            )  # guide done
 
         elif self.state == STATE_CALIBRATE and self.calibration_run is not None:  # the metronome screen
             run = self.calibration_run  # shorter lines below

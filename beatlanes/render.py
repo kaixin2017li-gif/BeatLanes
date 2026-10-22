@@ -1246,7 +1246,7 @@ def draw_title(  # the waiting screen
 
     pulse = 255 if anim_ms is None else int(190 + 65 * math.sin(anim_ms / 380.0))  # the start hint breathes
     hint_row(surface, ((("SPACE",), "START"), (("C",), "CALIBRATE"), (("ESC",), "QUIT")), centre_x, _s(486), size=13, alpha=pulse)  # the main keys
-    extra = [(("TAB",), "timing overlay in play")]  # always true
+    extra = [(("TAB",), "timing overlay in play"), (("G",), "guide")]  # always true
     if picker:  # only worth saying when there is a choice
         extra.insert(0, (("LEFT", "RIGHT"), "change chart"))  # arrows first
     # the second row used to be 10px caps in the dimmest colour, sitting right
@@ -1415,3 +1415,69 @@ def draw_results(  # the results screen
 
     text(surface, f"tap log  {log_name}", (centre_x, card.bottom + _s(16)), size=12, colour=config.TEXT_DIM, mono=True, align="center")  # which csv
     hint_row(surface, ((("R",), "RETRY"), (("T",), "TITLE"), (("ESC",), "QUIT")), centre_x, _s(540), size=13)  # the keys
+
+
+def draw_guide(  # the week 12 short guide: one screen, everything a first run needs
+    surface: pygame.Surface,  # where to draw
+    calibration_ms: float,  # the saved offset, for the calibration row
+) -> None:  # draws, returns nothing
+    """The short guide from the week 12 plan. One screen, five short rows, no
+    scrolling: what the keys are, when to press, what the windows mean, why
+    calibration exists, and which key opens the two-clock overlay."""
+    draw_background(surface)  # the gradient
+    centre_x = config.WINDOW_WIDTH / 2.0  # same as the other screens
+
+    tracked_text(surface, "HOW TO PLAY", (centre_x, _s(18)), size=13, colour=config.HIT_FLASH, tracking=6, align="center")  # the label
+    gradient_text(surface, "BEATLANES", (centre_x, _s(66)), size=40, align="middle")  # the small logo, its middle sits at 66
+
+    card = pygame.Rect(_s(110), _s(112), _s(740), _s(420))  # the guide card
+    panel(surface, card, alpha=238)  # nearly solid, the text has to read
+
+    left = card.x + _s(36)  # the text column
+    row = card.y + _s(28)  # the first row's top, moves down as rows are drawn
+    gap = _s(76)  # row pitch, fills the card evenly
+
+    # row 1: the four lanes and the one rule
+    cursor = left  # the key caps draw left to right
+    for lane in range(config.LANE_COUNT):  # one cap per lane
+        cap = keycap(surface, config.LANE_LABELS[lane], (int(cursor), row), size=13, tint=LANE_TINTS[lane])  # the lane's colour
+        cursor = cap.right + _s(6)  # next cap beside it
+    text(surface, "one key per lane", (cursor + _s(10), row + _s(8)), size=14, colour=config.TEXT_MUTED, bold=True)  # the caption
+    text(surface, "press the key as the note meets the glowing line", (left, row + _s(34)), size=15, colour=config.TEXT, bold=True)  # the one rule
+
+    # row 2: the two windows, as the chips on the title screen show them
+    row += gap  # next row down
+    chips = (  # the same two windows the title screen shows
+        (f"PERFECT ±{config.PERFECT_MS:.0f} ms", config.PERFECT_COLOUR),  # the tight window
+        (f"GOOD ±{config.GOOD_MS:.0f} ms", config.GOOD_COLOUR),  # the loose window
+    )  # two chips
+    chip_x = left  # they start at the text column
+    for message, colour in chips:  # draw them left to right
+        width = text_width(message, 12, bold=True) + _s(22)  # chip() pads by this much
+        chip(surface, message, (chip_x + width // 2, row + _s(13)), colour)  # centred where we want it
+        chip_x += width + _s(10)  # next one beside it
+    text(surface, "the closer to the line, the better the judgement", (chip_x + _s(10), row + _s(5)), size=13, colour=config.TEXT_MUTED)  # what they mean
+
+    # row 3: the countdown
+    row += gap  # next row down
+    text(surface, "the countdown lands on the first note", (left, row), size=15, colour=config.TEXT, bold=True)  # the heading
+    text(surface, "3, 2, 1 sit on the three seconds before it, GO when it reaches the line", (left, row + _s(26)), size=13, colour=config.TEXT_MUTED)  # the detail
+
+    # row 4: calibration
+    row += gap  # next row down
+    keycap(surface, "C", (left, row - _s(4)), size=13)  # the key
+    text(surface, "calibration", (left + _s(48), row + _s(4)), size=15, colour=config.TEXT, bold=True)  # the heading
+    text(surface, f"tap a key on every metronome click; the measured delay ({calibration_ms:+.0f} ms) is subtracted from the clock", (left, row + _s(30)), size=13, colour=config.TEXT_MUTED)  # the why
+
+    # row 5: charts, the overlay, and the tap log
+    row += gap  # next row down
+    cursor = left  # the arrow caps draw first
+    for key in ("LEFT", "RIGHT"):  # one cap each
+        cursor = keycap(surface, key, (int(cursor), row), size=12, dim=True).right + _s(4)  # beside each other
+    text(surface, "change chart", (cursor + _s(8), row + _s(5)), size=13, colour=config.TEXT_MUTED)  # the caption
+    tab_x = cursor + _s(8) + text_width("change chart", 13) + _s(40)  # the TAB pair starts after the arrows' caption
+    tab = keycap(surface, "TAB", (int(tab_x), row), size=12, dim=True)  # the overlay key
+    text(surface, "the two-clock timing overlay", (tab.right + _s(8), row + _s(5)), size=13, colour=config.TEXT_MUTED)  # the caption
+    text(surface, "every run also writes a csv tap log, one row per note, for the drift analysis", (left, row + _s(30)), size=13, colour=config.TEXT_MUTED)  # the log line
+
+    hint_row(surface, ((("G",), "BACK"), (("ESC",), "TITLE")), centre_x, _s(566), size=13)  # how to leave
