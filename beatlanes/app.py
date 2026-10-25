@@ -2,6 +2,11 @@
 #
 # States: TITLE (waiting) -> CALIBRATE (metronome test) -> COUNTDOWN (3,2,1,GO)
 # -> PLAY (song running, taps judged) -> RESULTS (run over, log written).
+# GUIDE (week 12) is a side trip from the title screen and straight back.
+#
+# Week 12 also adds hold notes, which is the first time a key-up matters: in
+# PLAY a lane key coming up is handed to the session, which decides whether a
+# hold in that lane was kept to its tail or dropped.
 #
 # The loop is deliberately plain: cap the frame rate, read the clock, handle
 # events, update the session, draw. Notes are never moved by a per-frame step -
@@ -100,6 +105,7 @@ class BeatLanesApp:  # the whole game, wired together
         mixer_pos_provider: Optional[Callable[[], int]] = None,  # injectable mixer
         enable_audio: bool = True,  # False for silent runs
         simulated_taps: Optional[Sequence[tuple[int, float]]] = None,  # automatic run
+        simulated_releases: Optional[Sequence[tuple[int, float]]] = None,  # week 12: key-ups for the holds in an automatic run
         screenshot_path: Optional[Path | str] = None,  # save one frame
         screenshot_at_ms: float = 12_000.0,  # when to take it
         screenshot_state: str = STATE_PLAY,  # which screen
@@ -180,6 +186,12 @@ class BeatLanesApp:  # the whole game, wired together
             SimulatedTaps(simulated_taps) if simulated_taps else None  # built now if we have them
         )  # feeder ready
         self.simulated_taps = list(simulated_taps) if simulated_taps else []  # kept for restarts
+        # key-ups work the same way as the taps: a sorted list fed in by song
+        # time. only holds need them, a tap's key-up never decides anything
+        self.simulated_releases = list(simulated_releases) if simulated_releases else []  # kept for restarts too
+        self.auto_releases: Optional[SimulatedTaps] = (  # the feeder for prepared key-ups
+            SimulatedTaps(self.simulated_releases) if self.simulated_releases else None  # same class, different meaning
+        )  # feeder ready
         self.last_accuracy: dict[str, float] = {}  # chart title -> last run's accuracy, shown on the title screen
         self.best_accuracy: dict[str, float] = {}  # chart title -> best accuracy this session
         self.new_best = False  # the results screen shows a NEW BEST pill
@@ -311,7 +323,13 @@ class BeatLanesApp:  # the whole game, wired together
             elif event.type == pygame.WINDOWFOCUSGAINED:  # back in the window
                 self._disable_text_input()  # SDL turned text input back on, turn it off again
             elif event.type == pygame.WINDOWFOCUSLOST:  # clicked away
-                self.held.clear()  # the key-ups go to the other window, so forget what was held
+                # the key-ups go to the other window, so forget what was held. a
+                # hold that was down is let go now: without this it would be
+                # counted as held all the way while the player is somewhere else
+                if self.state == STATE_PLAY and self.session is not None:  # only a run has holds
+                    for lane in list(self.session.holding):  # a copy, releasing edits it
+                        self.session.register_release(lane)  # judged on this moment
+                self.held.clear()  # every key cap rises
             elif event.type in (pygame.TEXTEDITING, pygame.TEXTINPUT):  # only an input method makes these now
                 self._disable_text_input()  # something switched it back on, switch it off again
             elif event.type == pygame.KEYDOWN:  # keys are the only input
@@ -320,6 +338,8 @@ class BeatLanesApp:  # the whole game, wired together
                 lane = config.LANE_KEY_TO_INDEX.get(key_name_for(event))  # was it a lane key?
                 if lane is not None:  # yes
                     self.held.discard(lane)  # the key cap rises again
+                    if self.state == STATE_PLAY and self.session is not None:  # week 12: a key-up can end a hold
+                        self.session.register_release(lane)  # sampled on the clock now; does nothing for a tap
 
     def _handle_key(self, name: str) -> None:  # one key press, handled by state
         lane = config.LANE_KEY_TO_INDEX.get(name)  # is it a lane key?
@@ -394,6 +414,8 @@ class BeatLanesApp:  # the whole game, wired together
         self.log = TapLog(path=self.log_path, song=self.chart.title, calibration_ms=self.latency_offset)  # a new csv file per run
         self.session.logger = self.log  # the session writes rows through this
         self.auto_taps = SimulatedTaps(self.simulated_taps) if self.simulated_taps else None  # rebuilt so an R restart replays the same taps
+        self.auto_releases = SimulatedTaps(self.simulated_releases) if self.simulated_releases else None  # and the same key-ups
+        self.held.clear()  # a fresh run starts with every key up
         self.flashes.clear()  # no lanes lit at the start
         self.presses.clear()  # same for the key lights
         self.new_best = False  # nothing beaten yet
@@ -483,7 +505,15 @@ class BeatLanesApp:  # the whole game, wired together
                     )  # same call the key handler makes
                     if judgement is not None:  # a note scored: light the lane
                         self.flashes[lane] = tap_ms  # same flash rule as a real press
-            self.session.update(song_ms)  # miss the notes the song passed
+                    if lane in self.session.holding:  # that press started a hold
+                        self.held.add(lane)  # keep the key down until its prepared key-up
+            if self.auto_releases is not None:  # prepared key-ups, after the presses of the same frame
+                for lane, release_ms in self.auto_releases.due(song_ms):  # everything due by now
+                    self.held.discard(lane)  # the key cap rises
+                    self.session.register_release(lane, release_ms=release_ms)  # judged at its own time, like the taps
+            self.session.update(song_ms)  # finish the held tails, miss the notes the song passed
+            for lane, at in self.session.pop_kept_holds():  # a tail that landed with the key still down
+                self.flashes[lane] = at  # burst the key again, the hold is what scored
             if song_ms > self.chart.length_ms + 1200 and self.session.finished:  # 1.2 s past the last note
                 self._finish_play()  # everything judged, plus a little tail
             elif song_ms > self.chart.length_ms + 5000:  # stuck (unjudgeable notes)
@@ -527,6 +557,7 @@ class BeatLanesApp:  # the whole game, wired together
                 self.chart.note_count,  # notes shown under the title
                 self.latency_offset,  # the saved offset
                 last_accuracy=self.last_accuracy.get(self.chart.title),  # the last run on this chart, if any
+                hold_count=self.chart.hold_count,  # week 12: the meta line says how many are holds
                 anim_ms=None if self.headless else pygame.time.get_ticks(),  # None keeps captures identical
                 chart_picker=(len(self.chart_paths) > 1, self.chart_index, len(self.chart_paths)),  # the picker only shows with 2 or more charts
                 best_accuracy=self.best_accuracy.get(self.chart.title),  # best this session
@@ -688,6 +719,8 @@ class BeatLanesApp:  # the whole game, wired together
             "good": None if score is None else score.good,  # second
             "miss": None if score is None else score.miss,  # third
             "stray": None if score is None else score.stray_taps,  # presses that hit nothing
+            "holds_kept": None if self.session is None else self.session.holds_kept,  # week 12: tails held to the end
+            "holds_dropped": None if self.session is None else self.session.holds_dropped,  # and tails let go too early
             "accuracy": None if score is None else round(score.accuracy, 1),  # one decimal
             "best_combo": None if score is None else score.best_combo,  # the streak
             "log": str(self.last_log_path) if self.last_log_path else None,  # where the csv went

@@ -3,8 +3,9 @@
   "bpm": 120,
   "bars": 16,
   "intro_bars": 4,
-  "note_count": 64,
+  "note_count": 60,
   "written_by": "by hand, not generated. one pattern per section",
+  "week_12_fix": "the finale used to run on to 34500 ms, past the end of the 33 s song, and note_count said 64 for 60 notes. the same sixteen notes now sit inside bars 14-15 as the eighth-note run the section note always described",
   "sections": [
     "bars 4-5: warm-up, straight D F J K singles",
     "bars 6-7: mirror back J K F D",
@@ -62,20 +63,20 @@
     {"time": 27500, "lane": 1},
 
     {"time": 28000, "lane": 0},
-    {"time": 28500, "lane": 1},
-    {"time": 29000, "lane": 0},
+    {"time": 28250, "lane": 1},
+    {"time": 28500, "lane": 0},
+    {"time": 28750, "lane": 2},
+    {"time": 29000, "lane": 1},
+    {"time": 29250, "lane": 3},
     {"time": 29500, "lane": 2},
+    {"time": 29750, "lane": 0},
     {"time": 30000, "lane": 1},
-    {"time": 30500, "lane": 3},
+    {"time": 30250, "lane": 3},
+    {"time": 30500, "lane": 2},
+    {"time": 30750, "lane": 0},
+    {"time": 31000, "lane": 1},
     {"time": 31000, "lane": 2},
     {"time": 31500, "lane": 0},
-    {"time": 32000, "lane": 1},
-    {"time": 32500, "lane": 3},
-    {"time": 33000, "lane": 2},
-    {"time": 33500, "lane": 0},
-    {"time": 34000, "lane": 1},
-    {"time": 34000, "lane": 2},
-    {"time": 34500, "lane": 0},
-    {"time": 34500, "lane": 3}
+    {"time": 31500, "lane": 3}
   ]
 }

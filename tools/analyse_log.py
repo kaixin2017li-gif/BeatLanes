@@ -74,6 +74,22 @@ def verdict_tally(rows: list[dict[str, str]]) -> dict[str, int]:  # count each v
     return tally  # the counts
 
 
+def hold_tally(rows: list[dict[str, str]]) -> dict[str, int]:  # week 12: what happened to the hold notes
+    # logs from before week 12 have no hold_ms column, so they count no holds
+    tally = {"holds": 0, "kept": 0, "dropped": 0, "never_pressed": 0}  # one bucket each
+    for row in rows:  # every row
+        if int(row.get("hold_ms") or 0) <= 0:  # a tap, or an old log
+            continue  # not a hold
+        tally["holds"] += 1  # one more hold
+        if row["verdict"] != "MISS":  # scored, so it was held to the tail
+            tally["kept"] += 1  # kept
+        elif row.get("tap_ms"):  # a MISS with a press means the key came up too early
+            tally["dropped"] += 1  # dropped
+        else:  # a MISS with no press at all
+            tally["never_pressed"] += 1  # missed at the head, like a tap
+    return tally  # the counts
+
+
 def print_report(path: Path, rows: list[dict[str, str]]) -> None:  # the whole console report
     tally = verdict_tally(rows)  # verdict counts
     errors = errors_from(rows)  # the errors
@@ -85,6 +101,11 @@ def print_report(path: Path, rows: list[dict[str, str]]) -> None:  # the whole c
     print(  # the verdict line, split for width
         f"verdicts   PERFECT {tally['PERFECT']}   GOOD {tally['GOOD']}   MISS {tally['MISS']}"  # the three buckets
     )  # printed
+    holds = hold_tally(rows)  # week 12
+    if holds["holds"]:  # only logs with holds get the line
+        print(  # the hold line, split for width
+            f"holds      {holds['holds']}   kept {holds['kept']}   dropped {holds['dropped']}   never pressed {holds['never_pressed']}"  # what happened to the tails
+        )  # printed
     print()  # spacer
     print(f"all taps   {describe(errors)}")  # everything
     print(f"early      {describe(early)}   ({len(early)} taps)")  # the early taps

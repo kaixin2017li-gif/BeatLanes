@@ -5,6 +5,7 @@
 #   python main.py
 # These are used while building and testing:
 #   python main.py --selftest
+#   python main.py --selftest --chart charts/holds_120.json
 #   python main.py --screenshot docs/shots/play.png --at 14000
 
 from __future__ import annotations
@@ -19,19 +20,42 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from beatlanes import config  # the window constants
 from beatlanes.app import BeatLanesApp  # the game itself
 from beatlanes.chart import load_chart  # to read the chart file
+from beatlanes.judge import hold_was_kept  # week 12: the tail rule, so the expected counts use the game's own rule
 
 # Timing errors, in ms, applied to each note in turn by --selftest. The list
 # lands inside PERFECT, inside GOOD, and outside GOOD, covering all windows.
 SELFTEST_ERROR_CYCLE = (0, 5, -5, 30, -40, 15, 60, -70, 0, 110, -115, 130, -125, 0, 10, -20)
 
+# Week 12: when each hold's key comes up, against its tail, applied to the
+# holds in turn. 0 and +40 hold past the tail (the tail finishes it first),
+# -60 lets go inside the allowance, -400 lets go far too early and drops it.
+SELFTEST_RELEASE_CYCLE = (0, -60, 40, -400)
+
+
+def selftest_plan(chart) -> list[tuple[int, float, float | None]]:  # one (lane, press, release) per note
+    # the single place the prepared run is decided, so the taps, the key-ups
+    # and the expected counts can never disagree with each other
+    plan: list[tuple[int, float, float | None]] = []  # built up here
+    holds_seen = 0  # which release offset the next hold gets
+    for position, note in enumerate(chart.notes):  # walk the notes in order
+        press = note.time_ms + SELFTEST_ERROR_CYCLE[position % len(SELFTEST_ERROR_CYCLE)]  # the press, offset in time
+        release = None  # taps have no key-up that matters
+        if note.is_hold:  # a hold needs one
+            offset = SELFTEST_RELEASE_CYCLE[holds_seen % len(SELFTEST_RELEASE_CYCLE)]  # this hold's key-up against its tail
+            release = max(press + 1.0, note.end_ms + offset)  # never before its own press
+            holds_seen += 1  # the next hold gets the next offset
+        plan.append((note.lane, float(press), release))  # one entry per note
+    return plan  # in note order
+
 
 def build_selftest_taps(chart) -> list[tuple[int, float]]:  # the prepared presses for --selftest
     # one tap per note, shifted by the error cycle
-    taps: list[tuple[int, float]] = []  # built up here
-    for position, note in enumerate(chart.notes):  # walk the notes in order
-        error = SELFTEST_ERROR_CYCLE[position % len(SELFTEST_ERROR_CYCLE)]  # the error for this note
-        taps.append((note.lane, note.time_ms + error))  # press its lane, offset in time
-    return taps  # (lane, press time) pairs
+    return [(lane, press) for lane, press, _release in selftest_plan(chart)]  # (lane, press time) pairs
+
+
+def build_selftest_releases(chart) -> list[tuple[int, float]]:  # week 12: the prepared key-ups
+    # only the holds get one; a chart without holds gets an empty list
+    return [(lane, release) for lane, _press, release in selftest_plan(chart) if release is not None]  # (lane, key-up time) pairs
 
 
 def calibration_taps(bias_ms: float = 18.0) -> list[tuple[int, float]]:  # for the calibrate screenshot or recording
@@ -43,20 +67,28 @@ def calibration_taps(bias_ms: float = 18.0) -> list[tuple[int, float]]:  # for t
     return [(0, run.beat_time_ms(index) + bias_ms) for index in range(run.beats)]  # one tap per click
 
 
-def expected_counts(note_count: int) -> dict[str, int]:  # the numbers --selftest compares against
+def expected_counts(chart) -> dict[str, int]:  # the numbers --selftest compares against
     # what the session should produce, derived from the same window settings
-    counts = {"perfect": 0, "good": 0, "miss": 0, "stray": 0}  # one bucket each
-    for position in range(note_count):  # walk every note
-        error = abs(SELFTEST_ERROR_CYCLE[position % len(SELFTEST_ERROR_CYCLE)])  # its planned error
-        if error <= config.PERFECT_MS:  # inside PERFECT
-            counts["perfect"] += 1  # count it
-        elif error <= config.GOOD_MS:  # inside GOOD
-            counts["good"] += 1  # count it
-        else:  # outside both windows
+    counts = {"perfect": 0, "good": 0, "miss": 0, "stray": 0, "holds_kept": 0, "holds_dropped": 0}  # one bucket each
+    for note, (_lane, press, release) in zip(chart.notes, selftest_plan(chart)):  # walk every note with its plan
+        error = abs(press - note.time_ms)  # its planned error
+        if error > config.GOOD_MS:  # outside both windows
             # too far from the note: the press becomes a stray tap and the note
-            # is missed when the song passes it
+            # is missed when the song passes it. a hold missed this way never
+            # starts, so its key-up does nothing either
             counts["miss"] += 1  # the note dies
             counts["stray"] += 1  # and the press counted as a stray
+            continue  # nothing else to decide for this note
+        if note.is_hold and not hold_was_kept(release, note.end_ms):  # the press landed but the key came up too early
+            counts["miss"] += 1  # a dropped hold is a MISS, not a stray
+            counts["holds_dropped"] += 1  # and counted as dropped
+            continue  # the press verdict never counts
+        if note.is_hold:  # held to the tail
+            counts["holds_kept"] += 1  # counted as kept, and scored like its press below
+        if error <= config.PERFECT_MS:  # inside PERFECT
+            counts["perfect"] += 1  # count it
+        else:  # inside GOOD
+            counts["good"] += 1  # count it
     return counts  # the expectation
 
 
@@ -64,35 +96,40 @@ def run_selftest(args) -> int:  # returns 0 on pass, 1 on fail
     # play a whole chart with prepared taps and check the outcome
     chart = load_chart(args.chart)  # the chart to play
     taps = build_selftest_taps(chart)  # the prepared presses
+    releases = build_selftest_releases(chart)  # and the key-ups for the holds, if there are any
     app = BeatLanesApp(  # a silent headless app
         chart_path=args.chart,  # from the flags
         song_path=args.song,  # unused here, audio is off
         latency_offset_ms=args.offset if args.offset is not None else 0.0,  # tests run with offset 0
         enable_audio=False,  # headless, no sound
-        simulated_taps=taps,  # the prepared presses  # the prepared presses
+        simulated_taps=taps,  # the prepared presses
+        simulated_releases=releases,  # the prepared key-ups
         log_path=args.log,  # where the CSV goes
     )  # app ready
     app.debug = args.debug  # overlay if asked
     app.run()  # play the chart
     report = app.selftest_report()  # what actually happened
-    expected = expected_counts(chart.note_count)  # what should have happened
+    expected = expected_counts(chart)  # what should have happened
 
-    print(f"selftest  chart '{report['chart']}'  {report['notes']} notes  {report['taps_fed']} taps fed")  # the header line
+    print(f"selftest  chart '{report['chart']}'  {report['notes']} notes  {report['taps_fed']} taps fed  {len(releases)} key-ups fed")  # the header line
     if report["perfect"] is None:  # never reached the results screen
         print("SELFTEST FAILED: the run never reached the results screen")  # say why
         return 1  # failure
 
-    print(f"{'':10} {'expected':>9} {'actual':>9}")  # the column headings
+    print(f"{'':13} {'expected':>6} {'actual':>9}")  # the column headings
     problems = []  # collected while comparing
-    for key in ("perfect", "good", "miss", "stray"):  # compare each count
+    keys = ["perfect", "good", "miss", "stray"]  # every chart has these
+    if chart.hold_count:  # week 12: charts with holds also check the tails
+        keys += ["holds_kept", "holds_dropped"]  # kept and dropped
+    for key in keys:  # compare each count
         wanted = expected[key]  # from the window maths
         got = report[key]  # from the real run
         flag = "" if wanted == got else "   <-- differs"  # marks a mismatch in the printout
         if wanted != got:  # remember it
             problems.append(key)  # for the final verdict
-        print(f"{key:10} {wanted:>9} {got:>9}{flag}")  # one row per count
-    print(f"{'accuracy':10} {'':>9} {report['accuracy']:>8.1f}%")  # the accuracy row
-    print(f"{'best combo':10} {'':>9} {report['best_combo']:>9}")  # the streak
+        print(f"{key:13} {wanted:>6} {got:>9}{flag}")  # one row per count
+    print(f"{'accuracy':13} {'':>6} {report['accuracy']:>8.1f}%")  # the accuracy row
+    print(f"{'best combo':13} {'':>6} {report['best_combo']:>9}")  # the streak
     print(f"log       {report['log']}")  # where the csv went
 
     if problems:  # any mismatch fails the run
@@ -168,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:  # argv override for tests
     # some modes need the prepared taps: autoplay shows a real run, results and
     # record need notes actually scored
     auto_taps = None  # the prepared presses, if this mode needs them
+    auto_releases = None  # week 12: the prepared key-ups for the holds
     if args.shot_state == "calibrate":  # the calibration screen uses its own taps
         auto_taps = calibration_taps()  # the metronome taps
     else:  # every other mode
@@ -175,7 +213,9 @@ def main(argv: list[str] | None = None) -> int:  # argv override for tests
             args.screenshot is not None and args.shot_state == "results"  # a results shot needs scored notes
         ) or args.record is not None  # recordings always do
         if needs_taps:  # build them once
-            auto_taps = build_selftest_taps(load_chart(args.chart))  # the same error cycle as --selftest
+            chart = load_chart(args.chart)  # the chart that will be played
+            auto_taps = build_selftest_taps(chart)  # the same error cycle as --selftest
+            auto_releases = build_selftest_releases(chart)  # and the same key-ups
 
     app = BeatLanesApp(  # the game, wired to the flags
         chart_path=args.chart,  # straight from the flags from here down
@@ -183,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:  # argv override for tests
         latency_offset_ms=args.offset,  # same
         enable_audio=not args.no_audio,  # flipped flag
         simulated_taps=auto_taps,  # may be None
+        simulated_releases=auto_releases,  # may be None, always None for charts without holds
         windowed=args.windowed,  # keep a window
         record_path=args.record,  # may be None
         record_fps=args.record_fps,  # footage rate

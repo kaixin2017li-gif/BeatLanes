@@ -14,7 +14,8 @@ LOG_DIR = PROJECT_DIR / "logs"  # taps are logged here when playing a song
 SONG_PATH = ASSET_DIR / "beatlanes_120.ogg"  # background music
 CHART_PATH = CHART_DIR / "beatlanes_120.json"  # chart that was generated
 CHART_2_PATH = CHART_DIR / "hand_120.json"  # chart made manually
-CHARTS = (CHART_PATH, CHART_2_PATH)  # changed using the LEFT RIGHT arrow keys on title screen
+CHART_3_PATH = CHART_DIR / "holds_120.json"  # week 12: the hand chart with hold notes in it
+CHARTS = (CHART_PATH, CHART_2_PATH, CHART_3_PATH)  # changed using the LEFT RIGHT arrow keys on title screen
 CALIBRATION_PATH = PROJECT_DIR / "calibration.json"  # stores your latency correction
 
 # --- window -----------------------------------------------------------------
@@ -51,6 +52,12 @@ JUDGE_LINE_Y = 520.0  # player judgement line
 # --- judgement windows (milliseconds) --------------------------------------
 PERFECT_MS = 50.0  # if the absolute error is less than or equal to this you get a PERFECT
 GOOD_MS = 120.0  # if the absolute error is less than or equal to this you get a GOOD any more will not be registered
+
+# --- hold notes (week 12) ----------------------------------------------------
+# a hold note is pressed like a tap, then the key has to stay down until the
+# tail reaches the line. nobody lets go on the exact millisecond, so the tail
+# gets the same kind of allowance the press does.
+HOLD_RELEASE_MS = 120.0  # letting go up to this long before the tail still counts as holding it
 
 # --- scoring ----------------------------------------------------------------
 POINTS_PERFECT = 100  # value of a PERFECT hit

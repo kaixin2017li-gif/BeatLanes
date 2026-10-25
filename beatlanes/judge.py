@@ -52,3 +52,10 @@ def judge_tap(tap_ms: float, target_ms: float) -> Judgement:  # puts the two ste
 def is_inside_good_window(error_ms: float) -> bool:  # a yes/no version for the session loop
     # this will be used to determine if the key press should even be scored
     return abs(error_ms) <= config.GOOD_MS  # the loose window, same number as the verdict
+
+
+def hold_was_kept(release_ms: float, end_ms: float) -> bool:  # week 12: the second half of a hold note
+    # a hold is judged twice: the press goes through judge_tap like any tap,
+    # then this decides the tail. letting go at end - HOLD_RELEASE_MS or later
+    # counts as holding to the end, anything earlier drops the hold
+    return float(release_ms) >= float(end_ms) - config.HOLD_RELEASE_MS  # the same kind of allowance the press gets

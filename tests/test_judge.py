@@ -16,6 +16,7 @@ from beatlanes import config  # noqa: E402  # the window numbers
 from beatlanes.judge import (  # noqa: E402  # everything under test
     Judgement,  # for the immutability test
     Verdict,  # the expected outcomes
+    hold_was_kept,  # week 12: the tail rule
     is_inside_good_window,  # the yes/no helper
     judge_tap,  # the full judgement
     verdict_for_error,  # the window rule
@@ -71,6 +72,22 @@ class JudgeTapTests(unittest.TestCase):  # the full tap flow
         judgement = Judgement(error_ms=10.0, verdict=Verdict.PERFECT)  # a normal one
         with self.assertRaises(Exception):  # changing it must fail
             judgement.error_ms = 20.0  # type: ignore[misc]  # the assignment we expect to blow up
+
+
+
+class HoldReleaseTests(unittest.TestCase):  # week 12: the second half of a hold note
+    def test_letting_go_on_the_tail_keeps_it(self):  # the ideal release
+        self.assertTrue(hold_was_kept(release_ms=3000.0, end_ms=3000.0))  # exactly on the tail
+
+    def test_letting_go_after_the_tail_keeps_it(self):  # holding too long is never punished
+        self.assertTrue(hold_was_kept(release_ms=3400.0, end_ms=3000.0))  # well past it
+
+    def test_the_allowance_edge_is_inclusive(self):  # same rule as the judgement windows
+        self.assertTrue(hold_was_kept(3000.0 - config.HOLD_RELEASE_MS, 3000.0))  # exactly on the edge still counts
+        self.assertFalse(hold_was_kept(3000.0 - config.HOLD_RELEASE_MS - 0.001, 3000.0))  # a hair earlier drops it
+
+    def test_letting_go_halfway_drops_it(self):  # the case the rule is for
+        self.assertFalse(hold_was_kept(release_ms=2000.0, end_ms=3000.0))  # a whole second early
 
 
 if __name__ == "__main__":  # run directly

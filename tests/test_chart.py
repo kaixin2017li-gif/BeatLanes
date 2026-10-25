@@ -150,5 +150,86 @@ class OrderingTests(unittest.TestCase):  # loading fixes the order
         self.assertEqual(chart.length_ms, 100)  # length from that note
 
 
+
+class EveryShippedChartTests(unittest.TestCase):  # week 12: all three charts on the title screen
+    """Every chart the title screen offers has to load, and has to fit inside
+    the song. The hand chart did not: its last six notes came after the music
+    had stopped, and nothing checked, because the old tests only looked at the
+    generated chart."""
+
+    def test_every_chart_loads(self):  # nothing on the picker can crash a run
+        for path in config.CHARTS:  # all of them
+            with self.subTest(chart=path.name):  # say which one failed
+                self.assertGreater(load_chart(path).note_count, 0)  # loads, and has notes
+
+    def test_every_note_ends_inside_the_song(self):  # the week 12 hand chart bug
+        from tools import beatplan  # the song length lives with the beat plan
+
+        for path in config.CHARTS:  # all of them
+            with self.subTest(chart=path.name):  # say which one failed
+                self.assertLessEqual(load_chart(path).length_ms, beatplan.SONG_MS)  # the last note or tail lands before the music stops
+
+    def test_the_note_count_field_matches_the_notes(self):  # the hand chart said 64 for 60 notes
+        for path in config.CHARTS:  # all of them
+            raw = json.loads(path.read_text(encoding="utf-8"))  # the file as written
+            if "note_count" not in raw:  # the field is optional
+                continue  # nothing to compare
+            with self.subTest(chart=path.name):  # say which one failed
+                self.assertEqual(raw["note_count"], len(raw["notes"]))  # the field tells the truth
+
+    def test_the_holds_chart_has_holds_and_taps(self):  # the point of the third chart
+        chart = load_chart(config.CHART_3_PATH)  # the week 12 chart
+        self.assertGreater(chart.hold_count, 0)  # some holds
+        self.assertLess(chart.hold_count, chart.note_count)  # and some taps too
+
+
+class HoldChartTests(unittest.TestCase):  # week 12: the optional "hold" field
+    def setUp(self):  # fresh temp dir per test
+        self._tmp = tempfile.TemporaryDirectory()  # a throwaway folder
+        self.directory = Path(self._tmp.name)  # the folder
+
+    def tearDown(self):  # clean up
+        self._tmp.cleanup()  # gone
+
+    def load(self, *notes) -> Chart:  # helper: a chart from note dicts
+        return load_chart(write_chart(self.directory, {"notes": list(notes)}))  # write and load
+
+    def test_no_hold_field_means_a_tap(self):  # the old charts keep working
+        note = self.load({"time": 1000, "lane": 0}).notes[0]  # a plain note
+        self.assertEqual(note.hold_ms, 0)  # no tail
+        self.assertFalse(note.is_hold)  # so a tap
+        self.assertEqual(note.end_ms, 1000)  # over at its own time
+
+    def test_a_hold_keeps_its_tail(self):  # the new field is read
+        note = self.load({"time": 1000, "lane": 2, "hold": 1500}).notes[0]  # a hold
+        self.assertTrue(note.is_hold)  # recognised
+        self.assertEqual(note.end_ms, 2500)  # head plus tail
+
+    def test_chart_length_includes_the_last_tail(self):  # the run must not stop mid-hold
+        chart = self.load({"time": 1000, "lane": 0, "hold": 3000}, {"time": 2000, "lane": 1})  # the hold ends last
+        self.assertEqual(chart.length_ms, 4000)  # the tail, not the later head
+        self.assertEqual(chart.hold_count, 1)  # one of the two is a hold
+
+    def test_a_negative_hold_is_rejected(self):  # tails cant point backwards
+        with self.assertRaises(ChartError):  # must raise
+            self.load({"time": 1000, "lane": 0, "hold": -10})  # minus ten ms
+
+    def test_a_hold_that_is_not_a_number_is_rejected(self):  # rubbish in the field
+        with self.assertRaises(ChartError):  # must raise
+            self.load({"time": 1000, "lane": 0, "hold": "long"})  # a word, not ms
+
+    def test_a_note_inside_a_hold_in_the_same_lane_is_rejected(self):  # the key is already down
+        with self.assertRaises(ChartError):  # must raise
+            self.load({"time": 1000, "lane": 1, "hold": 1000}, {"time": 1500, "lane": 1})  # starts halfway up the tail
+
+    def test_a_note_in_another_lane_during_a_hold_is_fine(self):  # the other hand is free
+        chart = self.load({"time": 1000, "lane": 1, "hold": 1000}, {"time": 1500, "lane": 3})  # same moment, other lane
+        self.assertEqual(chart.note_count, 2)  # both loaded
+
+    def test_the_same_lane_is_free_again_after_the_tail(self):  # one beat later is fine
+        chart = self.load({"time": 1000, "lane": 1, "hold": 1000}, {"time": 2500, "lane": 1})  # after the tail
+        self.assertEqual(chart.note_count, 2)  # both loaded
+
+
 if __name__ == "__main__":  # run directly
     unittest.main()  # run the tests

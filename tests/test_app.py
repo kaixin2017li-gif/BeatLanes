@@ -26,7 +26,9 @@ os.environ["SDL_AUDIODRIVER"] = "dummy"  # no sound
 
 import pygame  # noqa: E402  # after the driver names, or a window would open
 
-from beatlanes.app import STATE_COUNTDOWN, STATE_PLAY, STATE_RESULTS, STATE_TITLE, BeatLanesApp, key_name_for  # noqa: E402  # the thing under test
+from beatlanes import config  # noqa: E402  # the chart paths
+from beatlanes.app import STATE_COUNTDOWN, STATE_GUIDE, STATE_PLAY, STATE_RESULTS, STATE_TITLE, BeatLanesApp, key_name_for  # noqa: E402  # the thing under test
+from beatlanes.session import NoteState  # noqa: E402  # to look at a hold's state
 
 
 def key_event(kind: int, key: int, scancode: int = 0):  # a key event like SDL would make
@@ -145,6 +147,98 @@ class AppTests(unittest.TestCase):  # one app per test, on a clock the test cont
             self.assertEqual(digits.call_count, 1)  # now the digits show
             remaining = digits.call_args[0][1]  # what the renderer was told
             self.assertLessEqual(remaining, 3_000)  # never outside the window again
+
+
+    # --- week 12: the short guide ------------------------------------------
+    def test_g_on_the_title_opens_the_guide_and_g_closes_it(self):  # the way in and the way out
+        self.press(pygame.K_g)  # open it
+        self.assertEqual(self.app.state, STATE_GUIDE)  # the guide is up
+        self.press(pygame.K_g)  # same key again
+        self.assertEqual(self.app.state, STATE_TITLE)  # back home
+
+    def test_esc_on_the_guide_goes_back_instead_of_quitting(self):  # ESC quits from the title, not from here
+        self.press(pygame.K_g)  # open it
+        self.press(pygame.K_ESCAPE)  # back out
+        self.assertEqual(self.app.state, STATE_TITLE)  # on the title screen
+        self.assertTrue(self.app.running)  # and the game is still running
+
+    def test_the_guide_ignores_the_start_key(self):  # reading the guide should not start a run by accident
+        self.press(pygame.K_g)  # open it
+        self.press(pygame.K_SPACE)  # space on the guide
+        self.assertEqual(self.app.state, STATE_GUIDE)  # still reading
+        self.assertIsNone(self.app.session)  # no run was started
+
+    def test_g_is_found_by_its_position_too(self):  # same scancode fallback as the other letters
+        self.press(pygame.K_UNKNOWN, pygame.KSCAN_G)  # the layout gave no name
+        self.assertEqual(self.app.state, STATE_GUIDE)  # still read as G
+
+    def test_the_guide_draws(self):  # the screen itself, on the dummy window
+        self.press(pygame.K_g)  # open it
+        self.app._draw()  # one frame
+        self.assertEqual(self.app.frame.get_size(), (config.WINDOW_WIDTH, config.WINDOW_HEIGHT))  # drawn on the full frame
+
+
+class HoldKeyTests(unittest.TestCase):  # week 12: the first time a key-up matters
+    """The holds chart's first hold is F (lane 1) from 10000 to 11500 ms."""
+
+    def setUp(self) -> None:  # an app on the holds chart
+        self.now = 0  # the fake tick reading, in ms
+        self.folder = tempfile.TemporaryDirectory()  # for the tap log
+        self.app = BeatLanesApp(  # a plain, non-automatic app
+            chart_path=config.CHART_3_PATH,  # the chart with holds
+            enable_audio=False,  # no mixer
+            ticks_provider=lambda: self.now,  # the test moves time
+            mixer_pos_provider=lambda: -1,  # no music
+            latency_offset_ms=0.0,  # no calibration file involved
+            log_path=Path(self.folder.name) / "taps.csv",  # disposable
+        )  # app built
+        self.app._setup()  # opens the dummy window
+        self.press(pygame.K_SPACE)  # start a run, song time 0
+        self.now = 10_000  # the first hold's head
+        self.app._update()  # countdown over, the four warm-up taps missed
+        self.press(pygame.K_f)  # press the hold on time
+        self.hold = self.app.session.notes[4]  # the 10000 ms F hold
+        self.assertIs(self.hold.state, NoteState.HOLDING)  # the press started it
+
+    def tearDown(self) -> None:  # close everything
+        self.app._teardown()  # log closed, pygame shut down
+        self.folder.cleanup()  # temp folder gone
+
+    def feed(self, *events) -> None:  # same helper as above
+        with mock.patch("pygame.event.get", return_value=list(events)):  # instead of SDL's queue
+            self.app._handle_events()  # the code under test
+
+    def press(self, key: int) -> None:  # one key down
+        self.feed(key_event(pygame.KEYDOWN, key))  # through the handler
+
+    def test_letting_go_early_drops_the_hold(self):  # a key-up halfway up the tail
+        self.now = 10_600  # 900 ms before the tail
+        self.feed(key_event(pygame.KEYUP, pygame.K_f))  # let go
+        self.assertIs(self.hold.state, NoteState.MISSED)  # dropped
+        self.assertEqual(self.app.session.holds_dropped, 1)  # and counted
+
+    def test_letting_go_near_the_tail_keeps_the_hold(self):  # inside the allowance
+        self.now = 11_450  # 50 ms before the tail
+        self.feed(key_event(pygame.KEYUP, pygame.K_f))  # let go
+        self.assertIs(self.hold.state, NoteState.HIT)  # kept
+        self.assertEqual(self.app.session.holds_kept, 1)  # and counted
+
+    def test_holding_through_the_tail_keeps_it_and_bursts_the_key(self):  # no key-up at all
+        self.now = 11_500  # the tail reaches the line
+        self.app._update()  # one frame
+        self.assertIs(self.hold.state, NoteState.HIT)  # kept without a key-up
+        self.assertEqual(self.app.flashes.get(1), 11_500)  # the key bursts on the tail
+
+    def test_losing_focus_lets_go_of_the_hold(self):  # alt-tab mid-hold
+        self.now = 10_600  # partway through
+        self.feed(pygame.event.Event(pygame.WINDOWFOCUSLOST))  # click away
+        self.assertIs(self.hold.state, NoteState.MISSED)  # not held while the player is elsewhere
+        self.assertEqual(self.app.held, set())  # every key up
+
+    def test_the_hold_draws_while_it_is_held(self):  # the body pinned to the line
+        self.now = 10_700  # partway through
+        self.app._draw()  # one frame with a held hold on it
+        self.assertIn(1, self.app.session.holding)  # still held after drawing
 
 
 if __name__ == "__main__":  # run directly

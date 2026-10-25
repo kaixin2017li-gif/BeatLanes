@@ -17,6 +17,9 @@ Week 11 pass: one highway instead of four loose strips, a side HUD so the
 playfield stays clear, key caps drawn the same way on every screen, a MISS
 popup, and a timing strip on the results screen.
 
+Week 12: hold notes (a body from the head up to the tail, pinned to the line
+while the key is down) and the short guide screen.
+
 Every length here is written in design pixels (the 960x640 layout) and goes
 through _s() on its way to the screen, so the same code draws a sharp frame at
 any UI_SCALE. Font sizes and letter tracking stay in design pixels all the way
@@ -37,7 +40,7 @@ import pygame.gfxdraw  # anti-aliased circles, the plain draw module has none
 
 from . import __version__, config  # the shared settings, and the build number for the title
 from .judge import Verdict  # verdict names
-from .session import NoteState, PlaySession  # what a run looks like while playing
+from .session import LiveNote, NoteState, PlaySession  # what a run looks like while playing
 
 Colour = tuple[int, int, int]  # shorter hints below
 
@@ -566,6 +569,30 @@ def _note_glow(tint: Colour) -> pygame.Surface:  # the halo under a note
     return glow  # finished halo
 
 
+HOLD_BODY_SHARE = 0.42  # a hold's body is this much of a note's width, so the head still reads as the thing to hit
+
+
+def _hold_body_sprite(tint: Colour, lit: bool) -> pygame.Surface:  # the column between a hold's head and its tail
+    """One column of a hold body, the full window tall. Every row is the same,
+    so a body of any length is just the top part of this sprite, blitted with
+    an area - no per-frame drawing and no resizing."""
+    width = max(_s(6), int(config.NOTE_WIDTH * HOLD_BODY_SHARE))  # narrower than the head
+    key = ("hold_body", width, config.WINDOW_HEIGHT, tint, lit)  # cache key
+    cached = _SPRITES.get(key)  # built before?
+    if cached is not None:  # the usual cache check
+        return cached  # reuse
+    body = pygame.Surface((width, config.WINDOW_HEIGHT), pygame.SRCALPHA)  # translucent column
+    fill = _lighten(tint, 0.25) if lit else _darken(tint, 0.15)  # a held body brightens
+    body.fill((*fill, 150 if lit else 95))  # see-through, so the lane still shows behind it
+    edge = (*_lighten(tint, 0.55), 230 if lit else 150)  # the two rails
+    pygame.draw.line(body, edge, (0, 0), (0, config.WINDOW_HEIGHT), _s(2))  # left rail
+    pygame.draw.line(body, edge, (width - _s(2), 0), (width - _s(2), config.WINDOW_HEIGHT), _s(2))  # right rail
+    if lit:  # a bright core while it is held, like the core line on a note
+        pygame.draw.line(body, (255, 255, 255, 170), (width // 2, 0), (width // 2, config.WINDOW_HEIGHT), _s(2))  # the core
+    _SPRITES[key] = body  # cache it
+    return body  # finished column
+
+
 def _beam_sprite(lane: int) -> pygame.Surface:  # the column of light above a pressed key
     key = ("beam", lane)  # one per lane
     cached = _SPRITES.get(key)  # built before?
@@ -852,9 +879,42 @@ def draw_combo(surface: pygame.Surface, session: PlaySession, song_ms: float) ->
     tracked_text(surface, "COMBO", (centre_x, _s(204)), size=12, colour=_darken(colour, 0.35), tracking=5, align="center")  # the label under it
 
 
+def _draw_hold_body(surface: pygame.Surface, note: LiveNote, song_ms: float) -> None:  # one hold's body and tail cap
+    """The body runs from the tail down to the head. While the key is down the
+    head is pinned to the judgement line, so the body is eaten from below as
+    the tail comes down to meet it."""
+    holding = note.state is NoteState.HOLDING  # the key is down on it
+    head_y = config.JUDGE_LINE_Y if holding else note.screen_y(song_ms)  # pinned to the line while held
+    tail_y = note.tail_screen_y(song_ms)  # always above the head
+    top = max(0, int(tail_y))  # clipped to the window
+    bottom = min(config.WINDOW_HEIGHT, int(head_y))  # same
+    if bottom <= top:  # nothing of it on screen
+        return  # done
+    tint = LANE_TINTS[note.lane]  # lane colour
+    body = _hold_body_sprite(tint, holding)  # cached column
+    x = int(lane_centre_x(note.lane) - body.get_width() / 2)  # centred in the lane
+    surface.blit(body, (x, top), area=pygame.Rect(0, 0, body.get_width(), bottom - top))  # only as tall as the hold is now
+    if tail_y >= -_s(8):  # the tail cap is on screen
+        cap = pygame.Rect(0, 0, body.get_width() + _s(10), _s(8))  # a little wider than the body
+        cap.center = (int(lane_centre_x(note.lane)), int(tail_y))  # on the tail time
+        pygame.draw.rect(surface, _lighten(tint, 0.5 if holding else 0.2), cap, border_radius=_s(4))  # the end of the hold
+
+
 def draw_notes(surface: pygame.Surface, session: PlaySession, song_ms: float) -> None:  # the falling notes
-    """Live notes, positioned from the song clock."""
+    """Live notes, positioned from the song clock. Hold bodies go first, so
+    every head sits on top of every body."""
+    for note in session.notes:  # week 12: the bodies
+        if note.is_hold and note.state in (NoteState.PENDING, NoteState.HOLDING):  # falling or being held
+            _draw_hold_body(surface, note, song_ms)  # body and tail cap
     for note in session.notes:  # every note in the chart
+        if note.state is NoteState.HOLDING:  # the head sits on the line while the key is down
+            tint = LANE_TINTS[note.lane]  # lane colour
+            sprite = _note_sprite(tint)  # same head image
+            note_rect = sprite.get_rect(center=(int(lane_centre_x(note.lane)), int(config.JUDGE_LINE_Y)))  # pinned
+            glow = _note_glow(tint)  # its halo
+            surface.blit(glow, glow.get_rect(center=note_rect.center))  # halo first
+            surface.blit(sprite, note_rect)  # head on top
+            continue  # nothing else to do for this one
         if note.state is not NoteState.PENDING:  # hit or missed already
             continue  # next note
         y = note.screen_y(song_ms)  # where it is now
@@ -934,6 +994,9 @@ def draw_receptors(  # the judgement line and the four keys on it
         slot = receptor_rect(lane)  # where it sits
         tint = LANE_TINTS[lane]  # the lane's colour
         lit = _press_strength(lane, presses, held, song_ms, 160.0)  # 0 resting, 1 pressed
+        holding = session is not None and lane in session.holding  # week 12: a hold is down in this lane
+        if holding:  # the key stays fully lit for the whole hold
+            lit = 1.0  # even if the key-down light has faded
         miss_at = misses.get(lane)  # when this lane last missed
         miss = 0.0  # 0 no flash, 1 just missed
         if miss_at is not None and 0 <= song_ms - miss_at < 300:  # a recent miss
@@ -948,6 +1011,10 @@ def draw_receptors(  # the judgement line and the four keys on it
         edge = _lerp_colour(_lerp_colour(config.RECEPTOR_EDGE, tint, 0.45), _lighten(tint, 0.3), lit)  # outline blends to the lane colour
         edge = _lerp_colour(edge, config.MISS_COLOUR, miss)  # red on a miss
         pygame.draw.rect(surface, edge, cap, width=_s(2), border_radius=_s(10))  # the outline
+        if holding:  # a second, softer outline so a held lane reads from the corner of the eye
+            pulse = 0.5 + 0.5 * math.sin(song_ms / 90.0)  # a quick shimmer, from the song clock so captures stay fixed
+            ring = cap.inflate(_s(6), _s(6))  # just outside the key
+            pygame.draw.rect(surface, _lerp_colour(tint, (255, 255, 255), 0.3 * pulse), ring, width=_s(2), border_radius=_s(13))  # the shimmer
         label = _lerp_colour(_lerp_colour(config.TEXT_MUTED, tint, 0.5), (255, 255, 255), lit)  # the letter brightens when pressed
         text(surface, config.LANE_LABELS[lane], cap.center, size=17, colour=label, bold=True, align="middle")  # the key name
 
@@ -1179,6 +1246,7 @@ def draw_title(  # the waiting screen
     chart_length_ms: float = 0.0,  # for the meta line
     lane_counts: Sequence[int] = (),  # notes per lane, drawn as small bars
     status_message: str = "",  # e.g. 'no audio device'
+    hold_count: int = 0,  # week 12: how many of the notes are holds
 ) -> None:  # draws, returns nothing
     """The waiting screen.
 
@@ -1206,7 +1274,8 @@ def draw_title(  # the waiting screen
     tracked_text(surface, label, (card.x + _s(28), card.y + _s(22)), size=11, colour=config.HIT_FLASH, tracking=3)  # top left
     shown, title_size = fit_text(chart_title, card.width - _s(56) - _s(150), 24, 15, bold=True)  # the title, fitted to the space left of the best score
     text(surface, shown, (card.x + _s(28), card.y + _s(42)), size=title_size, colour=config.TEXT, bold=True)  # the chart name
-    meta = f"{chart_bpm:.0f} BPM   ·   {note_count} NOTES   ·   {_clock_text(chart_length_ms + 1200.0)}"  # tempo, size, length
+    holds = f"   ·   {hold_count} HOLDS" if hold_count else ""  # only charts that have holds say so
+    meta = f"{chart_bpm:.0f} BPM   ·   {note_count} NOTES{holds}   ·   {_clock_text(chart_length_ms + 1200.0)}"  # tempo, size, length
     text(surface, meta, (card.x + _s(28), card.y + _s(78)), size=13, colour=config.TEXT_MUTED, bold=True)  # under the title
 
     if lane_counts:  # notes per lane, so two charts can be told apart at a glance
@@ -1262,7 +1331,7 @@ def draw_title(  # the waiting screen
     # the prototype is to learn, not to ship a commercial product
     text(surface, '"BUILDING TO LEARN"', (centre_x, _s(606)), size=11, colour=config.TEXT_MUTED, bold=True, align="center")  # the phrase itself
     text(surface, "the prototype is for learning, not for shipping", (centre_x, _s(624)), size=10, colour=config.TEXT_DIM, align="center")  # what it means
-    text(surface, f"v{__version__}  ·  week 11 build", (config.WINDOW_WIDTH - _s(16), config.WINDOW_HEIGHT - _s(24)), size=11, colour=config.TEXT_DIM, align="right")  # build tag, bottom right
+    text(surface, f"v{__version__}  ·  week 12 build", (config.WINDOW_WIDTH - _s(16), config.WINDOW_HEIGHT - _s(24)), size=11, colour=config.TEXT_DIM, align="right")  # build tag, bottom right
 
 
 def _stat_block(surface: pygame.Surface, label: str, value: str, centre_x: float, y: int, colour: Colour = config.TEXT) -> None:  # a small label over a number
@@ -1402,8 +1471,10 @@ def draw_results(  # the results screen
         if value > 0:  # something to fill
             pygame.draw.rect(surface, colour, pygame.Rect(left, track.y, max(_s(4), int(track.width * value / max(1, score.note_count))), track.height), border_radius=_s(2))  # share of the chart
 
-    stats = (("MAX COMBO", str(score.best_combo)), ("EARLY", str(score.early_taps)), ("LATE", str(score.late_taps)), ("STRAY", str(score.stray_taps)))  # the habits
-    step = (right - left) / len(stats)  # four equal columns
+    stats = [("MAX COMBO", str(score.best_combo)), ("EARLY", str(score.early_taps)), ("LATE", str(score.late_taps)), ("STRAY", str(score.stray_taps))]  # the habits
+    if session.hold_count:  # week 12: only charts with holds get a fifth column
+        stats.append(("HOLDS", f"{session.holds_kept}/{session.hold_count}"))  # tails held out of tails played
+    step = (right - left) / len(stats)  # four or five equal columns
     for index, (label, value) in enumerate(stats):  # one block each
         _stat_block(surface, label, value, left + step * (index + 0.5), card.y + _s(186))  # centred in its column
 
@@ -1417,13 +1488,33 @@ def draw_results(  # the results screen
     hint_row(surface, ((("R",), "RETRY"), (("T",), "TITLE"), (("ESC",), "QUIT")), centre_x, _s(540), size=13)  # the keys
 
 
+def _draw_mini_hold(surface: pygame.Surface, topleft: tuple[int, int], tint: Colour) -> pygame.Rect:  # a small hold note for the guide
+    """A hold note drawn small enough to sit next to a line of text: tail cap
+    on top, body, head at the bottom. Same parts as the real one in play."""
+    x, y = topleft  # where the icon starts
+    head = pygame.Rect(x, y + _s(26), _s(40), _s(10))  # the head, at the bottom like a note on the line
+    body = pygame.Rect(head.centerx - _s(8), y + _s(2), _s(16), head.y - y - _s(2))  # the body above it, about the same share of the head as in play
+    pygame.draw.rect(surface, _darken(tint, 0.35), body)  # body fill
+    pygame.draw.rect(surface, _lighten(tint, 0.4), body, width=_s(1))  # body rails
+    cap = pygame.Rect(body.x - _s(4), y, body.width + _s(8), _s(4))  # the tail cap
+    pygame.draw.rect(surface, _lighten(tint, 0.3), cap, border_radius=_s(2))  # on top of the body
+    pygame.draw.rect(surface, _lighten(tint, 0.3), head, border_radius=_s(4))  # the head
+    pygame.draw.line(surface, (255, 255, 255), (head.x + _s(6), head.centery), (head.right - _s(7), head.centery), _s(1))  # its core line
+    return pygame.Rect(x, y, head.width, head.bottom - y)  # the whole icon
+
+
 def draw_guide(  # the week 12 short guide: one screen, everything a first run needs
     surface: pygame.Surface,  # where to draw
     calibration_ms: float,  # the saved offset, for the calibration row
 ) -> None:  # draws, returns nothing
-    """The short guide from the week 12 plan. One screen, five short rows, no
-    scrolling: what the keys are, when to press, what the windows mean, why
-    calibration exists, and which key opens the two-clock overlay."""
+    """The short guide from the week 12 plan. One screen, six short rows, no
+    scrolling: what the keys are, when to press, what the windows mean and
+    what a MISS is, how a hold note works, why calibration exists, and which
+    keys change the chart and open the two-clock overlay.
+
+    The first version had five rows on a 76 px pitch, which left a hole under
+    the one-line windows row. The rows are now evenly packed and every row has
+    a heading line and a detail line."""
     draw_background(surface)  # the gradient
     centre_x = config.WINDOW_WIDTH / 2.0  # same as the other screens
 
@@ -1434,18 +1525,24 @@ def draw_guide(  # the week 12 short guide: one screen, everything a first run n
     panel(surface, card, alpha=238)  # nearly solid, the text has to read
 
     left = card.x + _s(36)  # the text column
-    row = card.y + _s(28)  # the first row's top, moves down as rows are drawn
-    gap = _s(76)  # row pitch, fills the card evenly
+    row = card.y + _s(30)  # the first row's top, moves down as rows are drawn
+    gap = _s(63)  # row pitch: six rows of heading + detail fill the card evenly
+
+    def detail(message: str, x: int, y: int) -> None:  # the quieter second line of a row
+        # fitted to the card, so a long line (or a big offset number) shrinks
+        # a size or two instead of running off the right edge
+        shown, size = fit_text(message, card.right - _s(36) - x, 13, 11)  # shrink a little rather than overflow
+        text(surface, shown, (x, y), size=size, colour=config.TEXT_MUTED)  # muted, under the heading
 
     # row 1: the four lanes and the one rule
     cursor = left  # the key caps draw left to right
     for lane in range(config.LANE_COUNT):  # one cap per lane
-        cap = keycap(surface, config.LANE_LABELS[lane], (int(cursor), row), size=13, tint=LANE_TINTS[lane])  # the lane's colour
+        cap = keycap(surface, config.LANE_LABELS[lane], (int(cursor), row - _s(6)), size=13, tint=LANE_TINTS[lane])  # the lane's colour
         cursor = cap.right + _s(6)  # next cap beside it
-    text(surface, "one key per lane", (cursor + _s(10), row + _s(8)), size=14, colour=config.TEXT_MUTED, bold=True)  # the caption
-    text(surface, "press the key as the note meets the glowing line", (left, row + _s(34)), size=15, colour=config.TEXT, bold=True)  # the one rule
+    text(surface, "one key per lane", (cursor + _s(10), row + _s(2)), size=14, colour=config.TEXT_MUTED, bold=True)  # the caption
+    text(surface, "press the key as the note meets the glowing line", (left, row + _s(30)), size=15, colour=config.TEXT, bold=True)  # the one rule
 
-    # row 2: the two windows, as the chips on the title screen show them
+    # row 2: the two windows, as the chips on the title screen show them, and what a MISS is
     row += gap  # next row down
     chips = (  # the same two windows the title screen shows
         (f"PERFECT ±{config.PERFECT_MS:.0f} ms", config.PERFECT_COLOUR),  # the tight window
@@ -1454,30 +1551,38 @@ def draw_guide(  # the week 12 short guide: one screen, everything a first run n
     chip_x = left  # they start at the text column
     for message, colour in chips:  # draw them left to right
         width = text_width(message, 12, bold=True) + _s(22)  # chip() pads by this much
-        chip(surface, message, (chip_x + width // 2, row + _s(13)), colour)  # centred where we want it
+        chip(surface, message, (chip_x + width // 2, row + _s(8)), colour)  # centred where we want it
         chip_x += width + _s(10)  # next one beside it
-    text(surface, "the closer to the line, the better the judgement", (chip_x + _s(10), row + _s(5)), size=13, colour=config.TEXT_MUTED)  # what they mean
+    text(surface, "the closer to the line, the better the judgement", (chip_x + _s(10), row), size=13, colour=config.TEXT_MUTED)  # what they mean
+    detail(f"no press within {config.GOOD_MS:.0f} ms and the note is a MISS; a press with no note near it is only a stray tap", left, row + _s(30))  # the other two outcomes
 
-    # row 3: the countdown
+    # row 3: hold notes, new in week 12
+    row += gap  # next row down
+    icon = _draw_mini_hold(surface, (left, row - _s(6)), LANE_TINTS[1])  # a small hold, in the F lane colour
+    heading = text(surface, "hold notes", (icon.right + _s(16), row), size=15, colour=config.TEXT, bold=True)  # the heading
+    text(surface, "press on the head, keep the key down until the tail reaches the line", (heading.right + _s(10), row + _s(2)), size=13, colour=config.TEXT_MUTED)  # the rule
+    detail(f"let go more than {config.HOLD_RELEASE_MS:.0f} ms before the tail and the hold is dropped: it counts as a MISS", icon.right + _s(16), row + _s(26))  # the catch
+
+    # row 4: the countdown
     row += gap  # next row down
     text(surface, "the countdown lands on the first note", (left, row), size=15, colour=config.TEXT, bold=True)  # the heading
-    text(surface, "3, 2, 1 sit on the three seconds before it, GO when it reaches the line", (left, row + _s(26)), size=13, colour=config.TEXT_MUTED)  # the detail
+    detail("3, 2, 1 sit on the three seconds before it, GO when it reaches the line", left, row + _s(26))  # the detail
 
-    # row 4: calibration
+    # row 5: calibration
     row += gap  # next row down
-    keycap(surface, "C", (left, row - _s(4)), size=13)  # the key
-    text(surface, "calibration", (left + _s(48), row + _s(4)), size=15, colour=config.TEXT, bold=True)  # the heading
-    text(surface, f"tap a key on every metronome click; the measured delay ({calibration_ms:+.0f} ms) is subtracted from the clock", (left, row + _s(30)), size=13, colour=config.TEXT_MUTED)  # the why
+    keycap(surface, "C", (left, row - _s(6)), size=13)  # the key
+    text(surface, "calibration", (left + _s(48), row + _s(2)), size=15, colour=config.TEXT, bold=True)  # the heading
+    detail(f"tap a key on every metronome click; the measured delay ({calibration_ms:+.0f} ms) is subtracted from the clock", left, row + _s(30))  # the why
 
-    # row 5: charts, the overlay, and the tap log
+    # row 6: charts, the overlay, and the tap log
     row += gap  # next row down
     cursor = left  # the arrow caps draw first
     for key in ("LEFT", "RIGHT"):  # one cap each
-        cursor = keycap(surface, key, (int(cursor), row), size=12, dim=True).right + _s(4)  # beside each other
-    text(surface, "change chart", (cursor + _s(8), row + _s(5)), size=13, colour=config.TEXT_MUTED)  # the caption
+        cursor = keycap(surface, key, (int(cursor), row - _s(6)), size=12, dim=True).right + _s(4)  # beside each other
+    text(surface, "change chart", (cursor + _s(8), row), size=13, colour=config.TEXT_MUTED)  # the caption
     tab_x = cursor + _s(8) + text_width("change chart", 13) + _s(40)  # the TAB pair starts after the arrows' caption
-    tab = keycap(surface, "TAB", (int(tab_x), row), size=12, dim=True)  # the overlay key
-    text(surface, "the two-clock timing overlay", (tab.right + _s(8), row + _s(5)), size=13, colour=config.TEXT_MUTED)  # the caption
-    text(surface, "every run also writes a csv tap log, one row per note, for the drift analysis", (left, row + _s(30)), size=13, colour=config.TEXT_MUTED)  # the log line
+    tab = keycap(surface, "TAB", (int(tab_x), row - _s(6)), size=12, dim=True)  # the overlay key
+    text(surface, "the two-clock timing overlay", (tab.right + _s(8), row), size=13, colour=config.TEXT_MUTED)  # the caption
+    detail("every run also writes a csv tap log, one row per note, for the drift analysis", left, row + _s(30))  # the log line
 
     hint_row(surface, ((("G",), "BACK"), (("ESC",), "TITLE")), centre_x, _s(566), size=13)  # how to leave

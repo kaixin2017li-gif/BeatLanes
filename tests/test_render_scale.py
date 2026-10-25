@@ -26,12 +26,12 @@ BACKDROP = (10, 10, 30)  # a colour none of the text uses
 
 
 class ScaleTests(unittest.TestCase):  # the layout follows UI_SCALE
-    @classmethod
+    @classmethod  # runs once for the whole class, fonts are shared
     def setUpClass(cls) -> None:  # fonts need pygame running
         pygame.init()  # dummy driver, nothing opens
         pygame.display.set_mode((16, 16))  # some pygame calls want a display
 
-    @classmethod
+    @classmethod  # the pair of setUpClass
     def tearDownClass(cls) -> None:  # leave the next test file a clean pygame
         render.set_ui_scale(1.0)  # back to the design
         pygame.quit()  # done
@@ -80,16 +80,33 @@ class ScaleTests(unittest.TestCase):  # the layout follows UI_SCALE
         render.draw_calibration(frame, 5, 16, [12.0, -8.0], 12.0, 0.4)  # metronome
         render.draw_countdown(frame, 1500.0)  # 3 2 1
         render.draw_go(frame, 400.0)  # GO
+        render.draw_guide(frame, 18.0)  # week 12: the short guide
+        self.assertEqual(frame.get_size(), (1440, 960))  # drawn at the real size
+
+    def test_hold_notes_draw_at_one_and_a_half(self) -> None:  # week 12: bodies, tails and the held key
+        from beatlanes.chart import Chart, ChartNote  # imported here, only this test needs them
+        from beatlanes.session import PlaySession  # same
+        from beatlanes.songclock import SongClock  # same
+
+        render.set_ui_scale(1.5)  # the user's scale
+        frame = pygame.Surface((config.WINDOW_WIDTH, config.WINDOW_HEIGHT), 0, 24)  # like the app's frame
+        notes = (ChartNote(0, 1, 1000, 1500), ChartNote(1, 3, 1800, 2000))  # two holds, one gets pressed
+        session = PlaySession(Chart("holds", 120.0, notes), SongClock(ticks_provider=lambda: 0, mixer_pos_provider=lambda: -1))  # no log
+        session.register_tap(1, tap_ms=1000.0)  # the first one is held
+        render.draw_notes(frame, session, 1600.0)  # one held body pinned to the line, one falling
+        render.draw_receptors(frame, session, {1: 1000.0}, {1}, {}, 1600.0)  # the held key lit
+        session.update(2500.0)  # first tail lands
+        render.draw_results(frame, session, "taps.csv", "holds", new_best=False)  # the five-column stats row
         self.assertEqual(frame.get_size(), (1440, 960))  # drawn at the real size
 
 
 class FadeTests(unittest.TestCase):  # the PERFECT popup that turned into a green box
-    @classmethod
+    @classmethod  # runs once for the whole class
     def setUpClass(cls) -> None:  # fonts need pygame running
         pygame.init()  # dummy driver
         pygame.display.set_mode((16, 16))  # some pygame calls want a display
 
-    @classmethod
+    @classmethod  # the pair of setUpClass
     def tearDownClass(cls) -> None:  # leave the next test file a clean pygame
         pygame.quit()  # done
 
@@ -106,7 +123,7 @@ class FadeTests(unittest.TestCase):  # the PERFECT popup that turned into a gree
 
     def test_popup_drawn_after_a_fade_is_not_a_box(self) -> None:  # the green slab
         def popup(alpha):  # the judgement word, as draw_judgement_popup draws it once the pop has settled
-            return lambda s: render.glow_text(s, "PERFECT", (200, 150), size=34, colour=config.PERFECT_COLOUR, glow=config.PERFECT_COLOUR, align="midbottom", alpha=alpha)
+            return lambda s: render.glow_text(s, "PERFECT", (200, 150), size=34, colour=config.PERFECT_COLOUR, glow=config.PERFECT_COLOUR, align="midbottom", alpha=alpha)  # the same cached stamp at this fade
 
         self.corner_after(popup(120))  # the first popup fading out
         self.assertEqual(self.corner_after(popup(255)), BACKDROP)  # the next popup, before the fix a solid box

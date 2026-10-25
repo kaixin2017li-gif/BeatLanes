@@ -16,6 +16,10 @@ HEADER = (  # order they appear in
     "error_ms",  # tap minus target
     "verdict",  # PERFECT GOOD MISS
     "mixer_pos_ms",  # the second clock, for drift checking
+    # week 12, added at the end so the older tools that read by column name
+    # still work on new logs
+    "hold_ms",  # 0 for a tap, the tail length for a hold
+    "release_ms",  # when a hold's key went up, blank if it stayed down past the tail
 )  # header done
 
 VerdictLike = Union[Verdict, str]  # will take an enum or string
@@ -52,6 +56,8 @@ class TapLog:  # takes the taps from one run and puts them in a csv
         error_ms: Optional[float],  # how far off we were, blank if missed
         verdict: VerdictLike,  # PERFECT GOOD or MISS
         mixer_pos_ms: Optional[int] = None,  # clock on the 2nd tick when we tapped
+        hold_ms: int = 0,  # week 12: the note's tail, 0 for a tap
+        release_ms: Optional[float] = None,  # week 12: when the hold was let go, blank for taps
     ) -> None:  # writes and returns
         # one note judged, with tap info or nothing if missed
         verdict_text = verdict.value if isinstance(verdict, Verdict) else str(verdict)  # enums and plain strings both fine here
@@ -64,6 +70,8 @@ class TapLog:  # takes the taps from one run and puts them in a csv
                 "" if error_ms is None else f"{error_ms:+.0f}",  # negative if early, positive if late
                 verdict_text,  # already a string from above
                 "" if mixer_pos_ms is None else mixer_pos_ms,  # blank if no sound
+                f"{hold_ms:.0f}",  # always filled, so taps and holds can be told apart
+                "" if release_ms is None else f"{release_ms:.0f}",  # blank unless the key went up before the tail
             ]  # row done
         )  # row done
 
