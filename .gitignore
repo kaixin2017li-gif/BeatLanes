@@ -17,3 +17,7 @@ calibration.json
 
 # macOS
 .DS_Store
+
+# Raw recording clips are regenerated with main.py --record, so only the
+two older clips worth keeping are tracked.
+docs/video/w12-*.mp4
